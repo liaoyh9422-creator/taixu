@@ -89,6 +89,13 @@ extensions.configure<ApplicationExtension> {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+
+        create("dev") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+            manifestPlaceholders["appLabel"] = "TaiXuDev"
+        }
     }
 
     compileOptions {

@@ -136,6 +136,9 @@ fun HomeScreen(
                 .padding(bottom = 104.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // 0. 自定义迭代版本卡片 (Custom Iteration Identity)
+            IterationCard()
+
             // 1. 运行时引擎主状态卡片 (Status Banner)
             RuntimeEngineStatusCard(
                 state = state,

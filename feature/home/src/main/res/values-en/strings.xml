@@ -47,4 +47,8 @@
     <string name="home_host_os">Host OS version</string>
     <string name="home_runtime_engine">Sandbox runtime</string>
     <string name="home_guest_os">Guest OS distribution</string>
+    <string name="home_iteration_title">Custom Iteration</string>
+    <string name="home_iteration_subtitle">Coexists with stable build</string>
+    <string name="home_iteration_tag">TaiXuDev</string>
+    <string name="home_iteration_version">0.5.0</string>
 </resources>

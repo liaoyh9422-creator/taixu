@@ -47,4 +47,8 @@
     <string name="home_host_os">宿主系统版本</string>
     <string name="home_runtime_engine">沙箱运行引擎</string>
     <string name="home_guest_os">Guest OS 发行版</string>
+    <string name="home_iteration_title">自定义迭代版本</string>
+    <string name="home_iteration_subtitle">与正式版独立共存</string>
+    <string name="home_iteration_tag">TaiXuDev</string>
+    <string name="home_iteration_version">0.5.0</string>
 </resources>

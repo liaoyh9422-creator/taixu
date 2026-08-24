@@ -35,7 +35,7 @@
         android:name=".TaiXuApplication"
         android:allowBackup="false"
         android:icon="@drawable/taixu_logo"
-        android:label="@string/taixu_app_name"
+        android:label="${appLabel}"
         android:localeConfig="@xml/taixu_locales_config"
         android:networkSecurityConfig="@xml/taixu_network_security_config"
         android:supportsRtl="true"
