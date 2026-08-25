@@ -12,6 +12,7 @@ import top.wkbin.taixu.runtime.DownloadProgress
 import top.wkbin.taixu.runtime.RegistryRoute
 import top.wkbin.taixu.runtime.RuntimePathManager
 import top.wkbin.taixu.runtime.RootfsUpdateInfo
+import java.io.BufferedInputStream
 import java.io.File
 import java.util.zip.GZIPInputStream
 import javax.inject.Inject
@@ -75,6 +76,62 @@ class RootfsInstaller @Inject constructor(
             logger.e("Failed to install OCI rootfs for $distroId", throwable)
             failure("OCI RootFS ($distroId) 安装失败", throwable)
         }
+    }
+
+    suspend fun importArchive(distroId: String, archive: File): AppResult<File> = withContext(Dispatchers.IO) {
+        val safeId = distroId.lowercase().trim()
+        require(safeId.matches(Regex("[a-z0-9][a-z0-9_-]{0,31}"))) { "Linux 发行版 ID 无效" }
+        require(archive.isFile) { "导入文件不存在" }
+        val staging = prepareStaging(safeId)
+        try {
+            BufferedInputStream(archive.inputStream()).use { buffered ->
+                buffered.mark(8)
+                val magic = ByteArray(4)
+                buffered.read(magic)
+                buffered.reset()
+                require(!(magic[0] == 'P'.code.toByte() && magic[1] == 'K'.code.toByte())) {
+                    "ZIP 无法可靠保留 Linux 权限与符号链接，请使用 tar、tar.gz、tar.xz 或 tar.zst"
+                }
+                val stream = when {
+                    magic[0] == 0x1f.toByte() && magic[1] == 0x8b.toByte() -> GZIPInputStream(buffered)
+                    magic[0] == 0x28.toByte() && magic[1] == 0xb5.toByte() -> ZstdInputStream(buffered)
+                    magic[0] == 0xfd.toByte() && magic[1] == 0x37.toByte() -> XZInputStream(buffered)
+                    else -> buffered
+                }
+                stream.use { tarStreamExtractor.extract(it, staging, handleWhiteouts = false) }
+            }
+            val actualRoot = normalizeImportedRoot(staging)
+            if (actualRoot != staging) {
+                val normalized = File(staging.parentFile, "rootfs.normalized")
+                SafeFileTree.delete(normalized)
+                check(actualRoot.renameTo(normalized)) { "无法整理导入 RootFS" }
+                SafeFileTree.delete(staging)
+                check(normalized.renameTo(staging)) { "无法提交导入 RootFS" }
+            }
+            rootfsValidator.validate(staging)
+            val target = pathManager.rootfsDir(safeId)
+            if (pathManager.isDistroInstalled(safeId)) preserveUserDirectories(target, staging)
+            replaceRootfs(safeId, staging, retainBackup = false)
+            markInstalled(safeId, OciRegistryClient.ImageInfo("local-import", "local-${archive.length()}-${archive.lastModified()}"))
+            pathManager.homeDir(safeId).mkdirs()
+            AppResult.Success(target)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            SafeFileTree.delete(staging)
+            logger.e("Failed to import rootfs archive for $safeId", throwable)
+            failure("导入 RootFS（$safeId）失败", throwable)
+        }
+    }
+
+    private fun normalizeImportedRoot(staging: File): File {
+        val children = staging.listFiles().orEmpty().filterNot { it.name == ".taixu" }
+        if (children.size == 1 && children[0].isDirectory) {
+            val nested = children[0]
+            val hasRootMarker = File(nested, "etc/os-release").isFile || File(nested, "usr/lib/os-release").isFile
+            if (hasRootMarker) return nested
+        }
+        return staging
     }
 
     suspend fun updateOci(
@@ -170,12 +227,43 @@ class RootfsInstaller @Inject constructor(
         return staging
     }
 
-    private suspend fun pullInto(
+    suspend fun resetDistro(
+        distribution: DistributionSpec,
+        route: RegistryRoute = RegistryRoute.AUTO,
+        onProgress: suspend (DownloadProgress) -> Unit = {},
+    ): AppResult<File> = withContext(Dispatchers.IO) {
+        val distroId = distribution.id.lowercase().trim()
+        val distroTargetDir = pathManager.rootfsDir(distroId)
+        val staging = prepareStaging(distroId)
+        recoverInterruptedUpdate(distroId)
+        try {
+            val image = restoreFromCacheOrPull(distribution, route, staging, onProgress)
+            rootfsValidator.validate(staging)
+            replaceRootfs(distroId, staging, retainBackup = false)
+            markInstalled(distroId, image)
+            SafeFileTree.delete(pathManager.homeDir(distroId))
+            pathManager.homeDir(distroId).mkdirs()
+            pathManager.ensureDistroDirectories(distroId)
+            pathManager.cleanupStalePtyMarkers(distroId)
+            logger.i("Reset distro ${distribution.displayName} ($distroId) to pristine state at $distroTargetDir")
+            AppResult.Success(distroTargetDir)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            SafeFileTree.delete(pathManager.stagingRootfsDir(distroId))
+            logger.e("Failed to reset rootfs for $distroId", throwable)
+            failure("重置沙箱 ($distroId) 失败", throwable)
+        }
+    }
+
+    private suspend fun restoreFromCacheOrPull(
         distribution: DistributionSpec,
         route: RegistryRoute,
         staging: File,
         onProgress: suspend (DownloadProgress) -> Unit,
     ): OciRegistryClient.ImageInfo {
+        val distroId = distribution.id.lowercase().trim()
+        val layersMarker = pathManager.distroLayersFile(distroId)
         val applyLayer: suspend (File, String) -> Unit = { layer, mediaType ->
             layer.inputStream().use { raw ->
                 val stream = when {
@@ -187,13 +275,66 @@ class RootfsInstaller @Inject constructor(
                 stream.use { tarStreamExtractor.extract(it, staging, handleWhiteouts = true) }
             }
         }
-        return try {
+        if (layersMarker.isFile) {
+            val lines = layersMarker.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+            val cachedLayers = lines.mapNotNull { line ->
+                val parts = line.split(":", limit = 3)
+                if (parts.size >= 3) {
+                    val type = parts[0]
+                    val fileName = parts[1]
+                    val mediaType = parts[2]
+                    val folder = if (type == "lxc") File(pathManager.cacheDir, "lxc_images") else File(pathManager.cacheDir, "oci_layers")
+                    val file = File(folder, fileName)
+                    if (file.isFile && file.length() > 0) Pair(file, mediaType) else null
+                } else null
+            }
+            if (cachedLayers.size == lines.size && cachedLayers.isNotEmpty()) {
+                logger.i("Found ${cachedLayers.size} cached layers for $distroId, restoring offline in 0-traffic mode")
+                val totalBytes = cachedLayers.sumOf { it.first.length() }
+                var unpackedBytes = 0L
+                cachedLayers.forEachIndexed { index, (file, mediaType) ->
+                    applyLayer(file, mediaType)
+                    unpackedBytes += file.length()
+                    onProgress(DownloadProgress(unpackedBytes, totalBytes))
+                    logger.i("Extracted cached layer ${index + 1}/${cachedLayers.size}: ${file.name}")
+                }
+                val version = pathManager.rootfsVersion(distroId) ?: "oci-cached-${distribution.id}"
+                val digest = pathManager.rootfsDigest(distroId) ?: "cached"
+                return OciRegistryClient.ImageInfo(version, digest)
+            }
+        }
+        return pullInto(distribution, route, staging, onProgress)
+    }
+
+    private suspend fun pullInto(
+        distribution: DistributionSpec,
+        route: RegistryRoute,
+        staging: File,
+        onProgress: suspend (DownloadProgress) -> Unit,
+    ): OciRegistryClient.ImageInfo {
+        val distroId = distribution.id.lowercase().trim()
+        val recordedLayers = mutableListOf<String>()
+        val applyLayer: suspend (File, String) -> Unit = { layer, mediaType ->
+            val type = if (mediaType.contains("lxc")) "lxc" else "oci"
+            recordedLayers.add("$type:${layer.name}:$mediaType")
+            layer.inputStream().use { raw ->
+                val stream = when {
+                    mediaType.contains("zstd") -> ZstdInputStream(raw)
+                    mediaType.contains("gzip") -> GZIPInputStream(raw)
+                    mediaType.contains("xz") -> XZInputStream(raw)
+                    else -> raw
+                }
+                stream.use { tarStreamExtractor.extract(it, staging, handleWhiteouts = true) }
+            }
+        }
+        val info = try {
             ociRegistryClient.pull(
                 distribution,
                 route,
                 File(pathManager.cacheDir, "oci_layers"),
                 onProgress,
                 resetDestination = {
+                    recordedLayers.clear()
                     SafeFileTree.delete(staging)
                     staging.mkdirs()
                 },
@@ -210,6 +351,7 @@ class RootfsInstaller @Inject constructor(
                     "minimal rootfs (不含 buildpack-deps 工具链)",
                 ociFailure,
             )
+            recordedLayers.clear()
             SafeFileTree.delete(staging)
             staging.mkdirs()
             val version = lxcImagesClient.pull(
@@ -220,6 +362,13 @@ class RootfsInstaller @Inject constructor(
             )
             OciRegistryClient.ImageInfo(version, "lxc-$version")
         }
+        if (recordedLayers.isNotEmpty()) {
+            runCatching {
+                pathManager.metadataDir(distroId).mkdirs()
+                pathManager.distroLayersFile(distroId).writeText(recordedLayers.joinToString("\n") + "\n")
+            }
+        }
+        return info
     }
 
     private fun replaceRootfs(distroId: String, staging: File, retainBackup: Boolean) {

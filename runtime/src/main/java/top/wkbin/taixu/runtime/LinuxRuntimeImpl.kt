@@ -131,6 +131,60 @@ class LinuxRuntimeImpl @Inject constructor(
         }
     }
 
+    override suspend fun importDistro(
+        request: RuntimeInstallRequest,
+        archive: File,
+    ): AppResult<Unit> = initializeMutex.withLock {
+        withContext(Dispatchers.IO) {
+            try {
+                updateInitializing("校验设备环境", 0.05f)
+                val architecture = detectArchitecture()
+                if (architecture != CpuArch.ARM64) {
+                    val error = AppError(ErrorCode.UNSUPPORTED_ARCHITECTURE, "手动导入仅支持 ARM64 RootFS")
+                    failInitialization(error)
+                    return@withContext AppResult.Failure(error)
+                }
+                checkStorage()
+                updateInitializing("导入 Linux RootFS", 0.2f, archive.name)
+                pathManager.ensureDirectories()
+                val prootResult = prootInstaller.install()
+                prootResult.errorOrNull()?.let { error ->
+                    failInitialization(error)
+                    return@withContext AppResult.Failure(error)
+                }
+                val distroId = request.distributionId.lowercase().trim()
+                val result = rootfsInstaller.importArchive(distroId, archive)
+                result.errorOrNull()?.let { error ->
+                    failInitialization(error)
+                    return@withContext AppResult.Failure(error)
+                }
+                updateInitializing("配置 Linux 系统", 0.65f)
+                configureRootfs(distroId)
+                configureDns(distroId)
+                configureEnvironment(distroId)
+                createWorkspace()
+                val health = healthChecker.check()
+                if (!health.isHealthy) {
+                    val error = AppError(ErrorCode.INSTALLATION_FAILED, "导入后的 Linux 环境健康检查失败：${health.detail.orEmpty()}")
+                    failInitialization(error)
+                    return@withContext AppResult.Failure(error)
+                }
+                _activeDistroId.value = distroId
+                settingsDataStore.setSelectedDistribution(distroId)
+                refreshInstalledDistros()
+                hostBridge.start()
+                _state.value = RuntimeState.Ready
+                AppResult.Success(Unit)
+            } catch (cancellation: CancellationException) {
+                _state.value = RuntimeState.NotInitialized
+                throw cancellation
+            } catch (throwable: Throwable) {
+                failInitialization(AppError(ErrorCode.INSTALLATION_FAILED, throwable.message ?: "导入失败", throwable))
+                AppResult.Failure(AppError(ErrorCode.INSTALLATION_FAILED, throwable.message ?: "导入失败", throwable))
+            }
+        }
+    }
+
     override suspend fun uninstallDistro(distroId: String): AppResult<Unit> = initializeMutex.withLock {
         withContext(Dispatchers.IO) {
             val safeId = distroId.lowercase().trim()
@@ -165,24 +219,39 @@ class LinuxRuntimeImpl @Inject constructor(
     override suspend fun resetSandbox(distroId: String?): AppResult<Unit> = initializeMutex.withLock {
         withContext(Dispatchers.IO) {
             val safeId = (distroId ?: _activeDistroId.value).lowercase().trim()
+            val wasActive = _activeDistroId.value == safeId
             try {
                 closeInteractiveSessions(safeId)
                 processRegistry.stopAll()
-                hostBridge.stop()
-                val result = rootfsInstaller.uninstallDistro(safeId)
+                if (wasActive) {
+                    hostBridge.stop()
+                }
+                val distribution = DistributionCatalog.require(safeId)
+                val result = rootfsInstaller.resetDistro(distribution)
                 if (result is AppResult.Success) {
-                    _activeDistroId.value = "ubuntu"
-                    settingsDataStore.setSelectedDistribution("ubuntu")
+                    configureRootfs(safeId)
+                    configureDns(safeId)
+                    configureEnvironment(safeId)
                     refreshInstalledDistros()
-                    _state.value = RuntimeState.NotInitialized
+                    if (wasActive) {
+                        if (!hostBridge.isRunning.value) {
+                            hostBridge.start()
+                        }
+                        _state.value = RuntimeState.Ready
+                    }
+                    logger.i("Reset sandbox distro $safeId successfully")
+                    AppResult.Success(Unit)
                 } else {
                     val error = result.errorOrNull()
-                    _state.value = RuntimeState.Error(
-                        error?.cause ?: IllegalStateException(error?.message ?: "Linux 环境重置失败"),
-                    )
+                    if (wasActive) {
+                        _state.value = RuntimeState.Error(
+                            error?.cause ?: IllegalStateException(error?.message ?: "Linux 环境重置失败"),
+                        )
+                    }
+                    AppResult.Failure(error ?: AppError(ErrorCode.INSTALLATION_FAILED, "重置 Linux 环境失败"))
                 }
-                result
             } catch (throwable: Throwable) {
+                logger.e("Failed to reset sandbox distro $safeId", throwable)
                 AppResult.Failure(AppError(ErrorCode.IO, "重置 Linux 环境失败：${throwable.message}", throwable))
             }
         }

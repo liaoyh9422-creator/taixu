@@ -18,6 +18,8 @@ import top.wkbin.taixu.core.model.ExecutionMode
 import top.wkbin.taixu.core.model.McpConnectionState
 import top.wkbin.taixu.core.model.RuntimeState
 import top.wkbin.taixu.runtime.LinuxEnvironmentManager
+import top.wkbin.taixu.runtime.RuntimePathManager
+import top.wkbin.taixu.runtime.proot.QemuCompatibilityLayout
 import top.wkbin.taixu.runtime.privilege.PhantomProcessLimitStatus
 import top.wkbin.taixu.runtime.privilege.PrivilegeManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -32,6 +34,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.Dispatchers
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
@@ -44,6 +48,7 @@ class SettingsViewModel @Inject constructor(
     private val privilegeManager: PrivilegeManager,
     private val mcpManager: top.wkbin.taixu.harness.mcp.McpManager,
     private val linuxRuntime: top.wkbin.taixu.runtime.LinuxRuntime,
+    private val pathManager: RuntimePathManager,
     private val linuxEnvironmentManager: LinuxEnvironmentManager,
     private val appUpdateManager: top.wkbin.taixu.core.network.AppUpdateManager,
     private val subagentRepository: top.wkbin.taixu.core.database.AgentSubagentRepository,
@@ -80,6 +85,21 @@ class SettingsViewModel @Inject constructor(
                 .distinctUntilChanged()
                 .collectLatest { (ready, distroId) ->
                     if (ready) refreshEnvironmentVariables(distroId)
+                }
+        }
+        viewModelScope.launch {
+            combine(
+                linuxRuntime.activeDistroId,
+                toolManager.installProgress,
+                toolManager.localPluginImportState,
+            ) { distroId, _, _ ->
+                QemuCompatibilityLayout.isReady(pathManager.taixuRootDir(distroId))
+            }
+                .flowOn(Dispatchers.IO)
+                .distinctUntilChanged()
+                .collectLatest { ready ->
+                    _qemuCompatibilityReady.value = ready
+                    if (ready) _qemuCompatibilityMessage.value = null
                 }
         }
     }
@@ -184,7 +204,7 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsDataStore.setAutoCheckUpdates(enabled) }
     }
 
-    fun checkForUpdates(currentVersion: String = "0.3.0") {
+    fun checkForUpdates(currentVersion: String) {
         viewModelScope.launch {
             _updateCheckState.value = top.wkbin.taixu.core.model.UpdateCheckState.Checking
             val res = appUpdateManager.checkUpdate(currentVersion)
@@ -245,9 +265,40 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun uninstallDistro(distroId: String) {
+    private val _restoringDistroId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val restoringDistroId: StateFlow<String?> = _restoringDistroId.asStateFlow()
+
+    fun resetDistro(distroId: String, onResult: ((Boolean, String) -> Unit)? = null) {
+        if (_restoringDistroId.value != null) return
+        _restoringDistroId.value = distroId
         viewModelScope.launch {
-            linuxRuntime.uninstallDistro(distroId)
+            val res = linuxRuntime.resetSandbox(distroId)
+            if (res is top.wkbin.taixu.core.common.result.AppResult.Success) {
+                toolManager.resetDistroState(distroId)
+            }
+            _restoringDistroId.value = null
+            if (res is top.wkbin.taixu.core.common.result.AppResult.Success) {
+                onResult?.invoke(true, "已恢复初始状态")
+            } else {
+                onResult?.invoke(false, res.errorOrNull()?.message ?: "重置失败")
+            }
+        }
+    }
+
+    private val _deletingDistroId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val deletingDistroId: StateFlow<String?> = _deletingDistroId.asStateFlow()
+
+    fun uninstallDistro(distroId: String, onResult: ((Boolean, String) -> Unit)? = null) {
+        if (_deletingDistroId.value != null) return
+        _deletingDistroId.value = distroId
+        viewModelScope.launch {
+            val res = linuxRuntime.uninstallDistro(distroId)
+            _deletingDistroId.value = null
+            if (res is top.wkbin.taixu.core.common.result.AppResult.Success) {
+                onResult?.invoke(true, "系统已成功删除")
+            } else {
+                onResult?.invoke(false, res.errorOrNull()?.message ?: "删除失败")
+            }
         }
     }
 
@@ -363,6 +414,12 @@ class SettingsViewModel @Inject constructor(
 
     val qemuCompatibilityEnabled: StateFlow<Boolean> = settingsDataStore.qemuCompatibilityEnabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private val _qemuCompatibilityMessage = MutableStateFlow<String?>(null)
+    val qemuCompatibilityMessage: StateFlow<String?> = _qemuCompatibilityMessage.asStateFlow()
+
+    private val _qemuCompatibilityReady = MutableStateFlow(false)
+    val qemuCompatibilityReady: StateFlow<Boolean> = _qemuCompatibilityReady.asStateFlow()
 
     val themeMode: StateFlow<String> = settingsDataStore.themeMode
         .stateIn(viewModelScope, SharingStarted.Eagerly, "system")
@@ -587,8 +644,15 @@ class SettingsViewModel @Inject constructor(
 
     fun setQemuCompatibilityEnabled(enabled: Boolean) {
         viewModelScope.launch {
+            if (enabled) {
+                val distroId = linuxRuntime.activeDistroId.value
+                if (!QemuCompatibilityLayout.isReady(pathManager.taixuRootDir(distroId))) {
+                    _qemuCompatibilityMessage.value = "未检测到 QEMU x86_64 兼容环境，无法开启。请先在插件中心安装 qemu-x86-64-compat 插件。"
+                    return@launch
+                }
+            }
+            _qemuCompatibilityMessage.value = null
             settingsDataStore.setQemuCompatibilityEnabled(enabled)
-            if (enabled) toolManager.startInstall("qemu-x86-64-compat")
         }
     }
 
