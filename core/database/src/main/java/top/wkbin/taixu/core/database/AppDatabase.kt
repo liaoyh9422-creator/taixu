@@ -10,7 +10,6 @@ import androidx.room.RoomDatabase
         InstallTaskEntity::class,
         RuntimeEntity::class,
         RuntimeDependencyRefEntity::class,
-        HarnessMessageEntity::class,
         HarnessSessionEntity::class,
         AiModelEntity::class,
         WorkspaceEntity::class,
@@ -26,8 +25,15 @@ import androidx.room.RoomDatabase
         ToolSettingsEntity::class,
         AgentApprovalRequestEntity::class,
         AgentApprovalSettingsEntity::class,
+        QuickPhraseEntity::class,
+        HarnessEntryEntity::class,
+        HarnessLaneEntity::class,
+        HarnessOperationEntity::class,
+        HarnessQueueItemEntity::class,
+        HarnessUsageEntity::class,
+        HarnessLaneResultEntity::class,
     ],
-    version = 28,
+    version = 31,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -35,7 +41,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun installLogDao(): InstallLogDao
     abstract fun installTaskDao(): InstallTaskDao
     abstract fun runtimeDao(): RuntimeDao
-    abstract fun harnessMessageDao(): HarnessMessageDao
     abstract fun harnessSessionDao(): HarnessSessionDao
     abstract fun aiModelDao(): AiModelDao
     abstract fun workspaceDao(): WorkspaceDao
@@ -47,4 +52,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun storageMountBindingDao(): StorageMountBindingDao
     abstract fun toolSettingsDao(): ToolSettingsDao
     abstract fun agentApprovalDao(): AgentApprovalDao
+    abstract fun quickPhraseDao(): QuickPhraseDao
+    abstract fun harnessRuntimeDao(): HarnessRuntimeDao
 }

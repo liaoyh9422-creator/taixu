@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.Settings
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
@@ -45,10 +46,6 @@ class PrivilegeManager @Inject constructor(
 
             ExecutionMode.SHIZUKU -> {
                 checkShizukuPrivilege()
-            }
-
-            ExecutionMode.ADB -> {
-                checkAdbPrivilege()
             }
         }
     }
@@ -173,34 +170,6 @@ class PrivilegeManager @Inject constructor(
     }
 
     /**
-     * 探测无线 ADB 连通性
-     */
-    private fun checkAdbPrivilege(): PrivilegeCheckResult {
-        return try {
-            val process = ProcessBuilder("sh", "-c", "which adb || echo ''").start()
-            val adbPath = process.inputStream.bufferedReader().readText().trim()
-            process.waitFor(2, TimeUnit.SECONDS)
-
-            if (adbPath.isNotBlank()) {
-                PrivilegeCheckResult.Authorized(
-                    ExecutionMode.ADB,
-                    "本地 ADB 调试工具链已就绪。",
-                )
-            } else {
-                PrivilegeCheckResult.Authorized(
-                    ExecutionMode.ADB,
-                    "无线 ADB 模式已就绪，可通过配对码或本地端口连接调试守护进程。",
-                )
-            }
-        } catch (e: Exception) {
-            PrivilegeCheckResult.Unauthorized(
-                ExecutionMode.ADB,
-                "ADB 探测失败: ${e.message}",
-            )
-        }
-    }
-
-    /**
      * 在授权成功后应用系统级特权优化（如解除 Android 12+ 幽灵进程 32 限制等）
      */
     private fun applyPrivilegeOptimizations(mode: ExecutionMode) {
@@ -222,11 +191,6 @@ class PrivilegeManager @Inject constructor(
                     .onFailure {
                         logger.w("通过 Shizuku 解除幽灵进程限制失败", it)
                     }
-            }
-            ExecutionMode.ADB -> {
-                runCatching {
-                    ProcessBuilder("sh", "-c", PHANTOM_PROCESS_REMOVE_COMMAND).start().waitFor(3, TimeUnit.SECONDS)
-                }
             }
             ExecutionMode.PROOT -> Unit
         }
@@ -278,13 +242,20 @@ class PrivilegeManager @Inject constructor(
         executeShellCommand(PHANTOM_PROCESS_REMOVE_COMMAND)
     }
 
-    // ============================ HostBridge 支持 ============================
+    // ============================ HostBridge / 对外接口 ============================
+
+    /** 响应式当前运行模式：DataStore 持久值，切换后所有订阅方（首页/Agent 同步）即刻收到更新。 */
+    val activeMode: Flow<ExecutionMode> = settingsDataStore.executionMode
+
+    /** 读取当前持久化的运行模式；读取失败时回退 PRoot。 */
+    private suspend fun currentMode(): ExecutionMode = runCatching { settingsDataStore.executionMode.first() }
+        .getOrDefault(ExecutionMode.PROOT)
 
     /**
      * 在宿主侧以当前特权模式执行 Shell 命令。
      * - SHIZUKU 模式：通过 Shizuku Binder 以 ADB 级别 (shell uid) 执行
      * - ROOT 模式：通过 su 以 root uid 执行
-     * - PROOT / ADB 模式：不支持，返回错误
+     * - PROOT 模式：不支持，返回错误
      *
      * 这是打破"循环权限依赖"的关键能力：
      * 沙箱内无法直接执行需要 shell/root 权限的 Android 命令（如 settings put、pm grant、appops set），
@@ -292,45 +263,57 @@ class PrivilegeManager @Inject constructor(
      * 在宿主侧以特权身份执行。
      */
     suspend fun executeShellCommand(command: String): ShellExecResult = withContext(Dispatchers.IO) {
-        val mode = runCatching { settingsDataStore.executionMode.first() }
-            .getOrDefault(ExecutionMode.PROOT)
+        val mode = currentMode()
 
         when (mode) {
             ExecutionMode.SHIZUKU -> executeViaShizuku(command)
             ExecutionMode.ROOT -> executeViaRoot(command)
-            ExecutionMode.PROOT, ExecutionMode.ADB -> ShellExecResult(
+            ExecutionMode.PROOT -> ShellExecResult(
                 success = false,
                 exitCode = -1,
                 stdout = "",
-                stderr = "当前运行模式 ($mode) 不支持宿主 Shell 执行。请在设置中切换到 Shizuku 或 Root 模式。",
+                stderr = "当前运行模式 (PRoot) 不支持宿主 Shell 执行。请在设置中切换到 Shizuku 或 Root 模式。",
             )
         }
     }
 
     /**
-     * 获取当前特权状态摘要（不执行命令，仅探测可用性）。
+     * 获取当前特权状态快照：当前激活模式 + 该模式的特权是否实际生效 + 各授权通道可用性。
+     * 这是首页 UI 与沙箱内 Agent（经 HostBridge /api/health）共用的权威状态来源。
+     * PRoot 模式无需探测即视为生效；Shizuku/Root 则以实时探测结果为准。
      */
     suspend fun getPrivilegeInfo(): PrivilegeInfo = withContext(Dispatchers.IO) {
+        val mode = currentMode()
+
         val shizukuAvailable = runCatching {
             Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
         }.getOrDefault(false)
 
-        val rootAvailable = runCatching {
-            val process = ProcessBuilder("su", "-c", "echo ok").start()
-            val completed = process.waitFor(3, TimeUnit.SECONDS)
-            if (!completed) {
-                process.destroyForcibly()
-                false
-            } else {
-                process.exitValue() == 0
-            }
-        }.getOrDefault(false)
+        // PRoot 无需任何授权，跳过耗时的 su 探测
+        val rootAvailable = if (mode == ExecutionMode.ROOT) {
+            runCatching {
+                val process = ProcessBuilder("su", "-c", "echo ok").start()
+                val completed = process.waitFor(3, TimeUnit.SECONDS)
+                if (!completed) {
+                    process.destroyForcibly()
+                    false
+                } else {
+                    process.exitValue() == 0
+                }
+            }.getOrDefault(false)
+        } else {
+            false
+        }
 
-        val mode = runCatching { settingsDataStore.executionMode.first() }
-            .getOrDefault(ExecutionMode.PROOT)
+        val modeActive = when (mode) {
+            ExecutionMode.PROOT -> true
+            ExecutionMode.SHIZUKU -> shizukuAvailable
+            ExecutionMode.ROOT -> rootAvailable
+        }
 
         PrivilegeInfo(
-            mode = mode.id,
+            mode = mode,
+            modeActive = modeActive,
             shizukuAvailable = shizukuAvailable,
             rootAvailable = rootAvailable,
         )
@@ -481,9 +464,12 @@ data class ShellExecResult(
     val stderr: String,
 )
 
-/** 特权状态摘要。 */
+/** 特权状态快照：首页 UI 与 HostBridge /api/health 共用的权威描述。 */
 data class PrivilegeInfo(
-    val mode: String,
+    /** 当前激活（已持久化）的运行模式。 */
+    val mode: ExecutionMode,
+    /** 当前激活模式的特权是否实际生效（PRoot 恒 true；Shizuku/Root 以实时探测为准）。 */
+    val modeActive: Boolean,
     val shizukuAvailable: Boolean,
     val rootAvailable: Boolean,
 )

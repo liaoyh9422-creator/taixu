@@ -1,4 +1,4 @@
-﻿package top.wkbin.taixu.core.database
+package top.wkbin.taixu.core.database
 
 import androidx.room.Dao
 import androidx.room.Entity
@@ -45,9 +45,12 @@ interface HarnessSessionDao {
     @Query("UPDATE harness_sessions SET approvalMode = :approvalMode, updatedAt = :updatedAt WHERE id = :id")
     suspend fun setApprovalMode(id: String, approvalMode: String, updatedAt: Long)
 
-    @Query("DELETE FROM harness_messages WHERE sessionId = :sessionId")
-    suspend fun deleteMessages(sessionId: String)
-
     @Query("DELETE FROM harness_sessions WHERE id = :id")
     suspend fun deleteSession(id: String)
+
+    @Query("SELECT COUNT(*) FROM harness_sessions WHERE (:start IS NULL OR createdAt >= :start) AND (:end IS NULL OR createdAt < :end)")
+    suspend fun countInRange(start: Long?, end: Long?): Int
+
+    @Query("SELECT * FROM harness_sessions")
+    suspend fun listAll(): List<HarnessSessionEntity>
 }

@@ -32,19 +32,6 @@ extensions.configure<ApplicationExtension> {
         ndk {
             abiFilters += "arm64-v8a"
         }
-        externalNativeBuild {
-            cmake {
-                arguments += "-DANDROID_STL=none"
-                cFlags += "-Wall"
-            }
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
     }
 
     val keystorePropertiesFile = rootProject.file("keystore.properties").takeIf { it.exists() }
@@ -178,9 +165,11 @@ dependencies {
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
     // Android must use the AAR; the default JVM JAR does not package Android JNI libraries.
-    implementation("com.github.luben:zstd-jni:${libs.versions.zstd.get()}@aar")
-    implementation(libs.kotlinx.serialization.json.jvm)
-    implementation(libs.kotlinx.coroutines.core.jvm)
+    implementation(libs.zstd) {
+        artifact { type = "aar" }
+    }
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)
@@ -214,8 +203,9 @@ tasks.configureEach {
 
 extensions.configure<ApplicationAndroidComponentsExtension> {
     onVariants { variant ->
+        val buildAppName = "taixu-v${appVersionName}-${variant.name}.apk"
         variant.outputs.forEach { output ->
-            output.outputFileName.set("taixu-v${appVersionName}-${variant.name}.apk")
+            output.outputFileName.set(buildAppName)
         }
     }
 }

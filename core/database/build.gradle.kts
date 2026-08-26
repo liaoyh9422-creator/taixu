@@ -28,8 +28,18 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
-    implementation(libs.kotlinx.coroutines.core.jvm)
-    implementation(libs.kotlinx.serialization.json.jvm)
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.serialization.json)
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.kotlinx.coroutines.core)
+    testImplementation(libs.androidx.room.testing)
+    testImplementation(libs.asm)
+    testImplementation(libs.asm.commons)
+    testImplementation(libs.asm.util)
+    testImplementation(libs.asm.tree)
+    testImplementation(libs.asm.analysis)
 }
 
 ksp {
