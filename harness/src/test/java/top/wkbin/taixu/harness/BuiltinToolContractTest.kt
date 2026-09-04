@@ -72,6 +72,19 @@ class BuiltinToolContractTest {
     }
 
     @Test
+    fun dualAgentToolExposesIsolatedModelAndDagControls() {
+        val tool = ProviderClient.TOOLS.single { it.function.name == "invoke_dual_agent" }
+        val properties = tool.function.parameters["properties"]!!.jsonObject
+        val required = tool.function.parameters["required"]!!.jsonArray.map { it.jsonPrimitive.content }
+
+        assertEquals(listOf("prompt"), required)
+        assertTrue("planner_model" in properties)
+        assertTrue("executor_model" in properties)
+        assertEquals("30", properties["max_steps"]!!.jsonObject["maximum"].toString())
+        assertTrue(tool.function.description.contains("DAG"))
+    }
+
+    @Test
     fun hostExposesStatusAndPrivilegedExec() {
         val host = ProviderClient.TOOLS.single { it.function.name == "host" }
         val encoded = host.function.parameters.toString()

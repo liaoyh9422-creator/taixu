@@ -8,7 +8,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import top.wkbin.taixu.core.database.HarnessSessionRepository
 import top.wkbin.taixu.harness.ApiMessage
 import top.wkbin.taixu.harness.ModelConfig
 import top.wkbin.taixu.harness.ProviderClient
@@ -33,9 +37,49 @@ class DualAgentCoordinator @Inject constructor(
     private val providerClient: ProviderClient,
     private val laneRunner: SubagentLaneRunner,
     private val promptBuilder: PlannerPromptBuilder,
-    private val json: Json,
+    private val sessionRepository: HarnessSessionRepository,
     private val eventBus: HarnessEventBus? = null,
 ) {
+
+    /** Production tool entry point used by ToolExecutor. */
+    suspend fun executeFromTool(
+        args: JsonObject,
+        sessionId: String,
+        workspace: String,
+    ): Pair<Boolean, String> {
+        val prompt = args["prompt"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        require(prompt.isNotBlank()) { "缺少参数：prompt" }
+        val session = sessionRepository.findById(sessionId)
+        val inheritedProfileId = session?.modelId
+        val inheritedVariant = session?.modelVariant
+        val plannerSelection = args["planner_model"]?.jsonPrimitive?.contentOrNull
+        val executorSelection = args["executor_model"]?.jsonPrimitive?.contentOrNull
+        val maxSteps = args["max_steps"]?.jsonPrimitive?.intOrNull
+            ?.coerceIn(1, MAX_TOOL_STEPS) ?: DEFAULT_MAX_STEPS
+        val plannerModel = providerClient.resolveRequestedModel(plannerSelection, inheritedProfileId, inheritedVariant)
+        val executorModel = providerClient.resolveRequestedModel(executorSelection, inheritedProfileId, inheritedVariant)
+        return when (val outcome = execute(
+            sessionId = sessionId,
+            userPrompt = prompt,
+            workspace = workspace,
+            plannerModel = plannerModel,
+            executorModel = executorModel,
+            maxSteps = maxSteps,
+        )) {
+            is DualAgentOutcome.Success -> true to buildString {
+                appendLine(outcome.finalReport)
+                appendLine()
+                append("双智能体执行完成：${outcome.plan.count { it.status == StepStatus.COMPLETED }}/${outcome.plan.size} 步，")
+                append("${outcome.totalToolCalls} 次工具调用，${outcome.totalRounds} 轮规划。")
+            }
+            is DualAgentOutcome.Failed -> false to buildString {
+                appendLine(outcome.message)
+                if (outcome.plan.isNotEmpty()) {
+                    append("当前进度：${outcome.plan.count { it.status == StepStatus.COMPLETED }}/${outcome.plan.size} 步完成。")
+                }
+            }
+        }
+    }
 
     suspend fun execute(
         sessionId: String,
@@ -48,6 +92,7 @@ class DualAgentCoordinator @Inject constructor(
         onStatusUpdate: (String) -> Unit = {},
     ): DualAgentOutcome = withContext(Dispatchers.IO) {
         val startedAt = System.currentTimeMillis()
+        val executionId = UUID.randomUUID().toString()
         val steps = mutableListOf<PlanStep>()
         var totalToolCalls = 0
         var roundCount = 0
@@ -88,6 +133,17 @@ class DualAgentCoordinator @Inject constructor(
 
             when (decision) {
                 is PlannerDecision.Finish -> {
+                    val incomplete = steps.filter { it.status != StepStatus.COMPLETED }
+                    if (incomplete.isNotEmpty()) {
+                        plannerMessages.add(
+                            ApiMessage(
+                                role = "user",
+                                content = "计划仍有未完成工序：${incomplete.joinToString { "${it.id}(${it.status})" }}。" +
+                                    "不得提前 FINISH；请继续执行就绪工序或使用 REPLAN 修复依赖。",
+                            ),
+                        )
+                        continue
+                    }
                     onPlanUpdated(steps)
                     onStatusUpdate("所有步骤已完成，任务已交付！")
                     return@withContext DualAgentOutcome.Success(
@@ -109,6 +165,7 @@ class DualAgentCoordinator @Inject constructor(
                     // 调度当前已就绪的步骤波次
                     val executedBatch = executeReadyBatch(
                         sessionId = sessionId,
+                        executionId = executionId,
                         workspace = workspace,
                         steps = steps,
                         executorModel = executorModel,
@@ -129,6 +186,7 @@ class DualAgentCoordinator @Inject constructor(
                     // 调度首轮已就绪的并发步骤波次
                     val executedBatch = executeReadyBatch(
                         sessionId = sessionId,
+                        executionId = executionId,
                         workspace = workspace,
                         steps = steps,
                         executorModel = executorModel,
@@ -144,29 +202,25 @@ class DualAgentCoordinator @Inject constructor(
                     val stepIndex = steps.indexOfFirst { it.id == currentStep.id }.let {
                         if (it >= 0) it else { steps.add(currentStep); steps.lastIndex }
                     }
-                    steps[stepIndex] = currentStep.copy(status = StepStatus.RUNNING)
+                    val previous = steps[stepIndex]
+                    steps[stepIndex] = currentStep.copy(
+                        status = previous.status,
+                        resultSummary = previous.resultSummary,
+                    )
                     onPlanUpdated(steps)
 
-                    // 单步执行（带 120s 超时保护）
-                    val (updatedStep, execResult) = executeSingleStep(
+                    // 所有 Planner 指令统一进入 DAG 就绪队列；禁止绕过未完成依赖直接执行。
+                    val executedBatch = executeReadyBatch(
                         sessionId = sessionId,
+                        executionId = executionId,
                         workspace = workspace,
-                        step = currentStep,
+                        steps = steps,
                         executorModel = executorModel,
+                        onPlanUpdated = onPlanUpdated,
                         onStatusUpdate = onStatusUpdate,
                     )
-                    steps[stepIndex] = updatedStep
-                    totalToolCalls += execResult.toolCallsCount
-                    onPlanUpdated(steps)
-
-                    // 组装单步汇报回传 Planner
-                    val feedbackText = buildString {
-                        appendLine("【步骤 ${currentStep.id}（${currentStep.title}）执行完毕】")
-                        appendLine("状态: ${if (execResult.success) "成功" else "失败"}")
-                        appendLine("交付总结: ${execResult.summary}")
-                        appendLine("请评估当前成果并给出下一步动作（EXECUTE_STEP、REPLAN 或 FINISH）。")
-                    }
-                    plannerMessages.add(ApiMessage(role = "user", content = feedbackText))
+                    totalToolCalls += executedBatch.sumOf { it.second.toolCallsCount }
+                    feedBatchResultsToPlanner(plannerMessages, executedBatch, steps)
                 }
             }
         }
@@ -183,6 +237,7 @@ class DualAgentCoordinator @Inject constructor(
      */
     private suspend fun executeReadyBatch(
         sessionId: String,
+        executionId: String,
         workspace: String,
         steps: MutableList<PlanStep>,
         executorModel: ModelConfig,
@@ -209,7 +264,7 @@ class DualAgentCoordinator @Inject constructor(
         // 并发执行本批次步骤
         val results = batch.map { step ->
             async {
-                executeSingleStep(sessionId, workspace, step, executorModel, onStatusUpdate)
+                executeSingleStep(sessionId, executionId, workspace, step, executorModel, onStatusUpdate)
             }
         }.awaitAll()
 
@@ -228,6 +283,7 @@ class DualAgentCoordinator @Inject constructor(
      */
     private suspend fun executeSingleStep(
         sessionId: String,
+        executionId: String,
         workspace: String,
         step: PlanStep,
         executorModel: ModelConfig,
@@ -236,7 +292,7 @@ class DualAgentCoordinator @Inject constructor(
         onStatusUpdate("执行者 (Executor) 正在执行：${step.title}")
         emitProgress(sessionId, step, StepStatus.RUNNING)
 
-        val stepLaneName = "executor_${step.id}"
+        val stepLaneName = "dual:$executionId:executor:${step.id}"
         val executorPrompt = buildString {
             appendLine("请严格执行以下单步工序并汇报成果：")
             appendLine("【步骤标题】: ${step.title}")
@@ -254,8 +310,7 @@ class DualAgentCoordinator @Inject constructor(
                     laneName = stepLaneName,
                     prompt = executorPrompt,
                     workspace = workspace,
-                    modelId = executorModel.name,
-                    modelVariant = executorModel.model,
+                    modelConfig = executorModel,
                 )
             }.getOrNull()
         }
@@ -336,6 +391,7 @@ class DualAgentCoordinator @Inject constructor(
 
     companion object {
         const val DEFAULT_MAX_STEPS = 10
+        const val MAX_TOOL_STEPS = 30
         const val MAX_CONCURRENT_STEPS = 3
         const val STEP_TIMEOUT_MS = 120_000L
     }

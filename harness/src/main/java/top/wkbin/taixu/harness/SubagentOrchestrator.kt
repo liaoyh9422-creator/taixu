@@ -45,6 +45,7 @@ class SubagentOrchestrator @Inject constructor(
     private val promptAssets: PromptAssetLoader,
     private val agentContextRepo: AgentContextRepository,
     private val fileAccess: WorkspaceFileAccess,
+    private val providerClient: ProviderClient,
 ) {
     /**
      * Application-wide budget: a three-agent fan-out should actually run three lanes at once,
@@ -111,13 +112,24 @@ class SubagentOrchestrator @Inject constructor(
                 toolCallCount = 0,
             )
         }
+        val targetModel = runCatching {
+            providerClient.resolveRequestedModel(spec.model, modelId, modelVariant)
+        }.getOrElse { failure ->
+            return SubagentExecutionOutcome(
+                spec = spec,
+                subSessionId = "",
+                isSuccess = false,
+                summary = failure.message ?: "无法解析子智能体模型",
+                toolCallCount = 0,
+                resolvedProfileId = profile.id,
+                resolvedProfileName = profile.name,
+            )
+        }
         val laneName = "subagent:${profile.id}:${java.util.UUID.randomUUID()}"
         laneManager.create(parentSessionId, laneName, parentLeaf)
         val prompt = buildSubagentPrompt(spec, profile, workspace, parentSessionId)
-        val targetModelId = spec.model?.takeIf { it.isNotBlank() } ?: modelId
-        val targetModelVariant = if (spec.model.isNullOrBlank()) modelVariant else null
         val laneResult = withTimeoutOrNull(SUBAGENT_TIMEOUT_MS) {
-            laneRunner.run(parentSessionId, laneName, prompt, workspace, targetModelId, targetModelVariant)
+            laneRunner.run(parentSessionId, laneName, prompt, workspace, modelConfig = targetModel)
         }
 
         // 超时取消时 withTimeoutOrNull 返回 null，若直接 ?: 0 会把子智能体在超时窗口内
@@ -136,7 +148,7 @@ class SubagentOrchestrator @Inject constructor(
             toolCallCount = toolCallCount,
             resolvedProfileId = profile.id,
             resolvedProfileName = profile.name,
-            resolvedModel = spec.model,
+            resolvedModel = "${targetModel.provider}/${targetModel.model}",
         )
     }
 

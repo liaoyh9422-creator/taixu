@@ -445,6 +445,31 @@ data class ModelConfig(
     val responseApiEnabled: Boolean = false,
 )
 
+internal data class RequestedModelTarget(
+    val profileId: String,
+    val variant: String? = null,
+)
+
+internal fun selectRequestedModelTarget(
+    profiles: List<top.wkbin.taixu.core.database.AiModelEntity>,
+    selection: String,
+): RequestedModelTarget? {
+    val requested = selection.trim()
+    if (requested.isBlank()) return null
+    profiles.firstOrNull {
+        it.id.equals(requested, ignoreCase = true) || it.name.equals(requested, ignoreCase = true)
+    }?.let { return RequestedModelTarget(profileId = it.id) }
+    profiles.forEach { entity ->
+        val canonicalVariant = entity.model.split(',')
+            .map { it.trim() }
+            .firstOrNull { it.equals(requested, ignoreCase = true) }
+        if (canonicalVariant != null) {
+            return RequestedModelTarget(profileId = entity.id, variant = canonicalVariant)
+        }
+    }
+    return null
+}
+
 /** LLM 接入协议：绝大多数厂商提供 OpenAI 兼容端点；Anthropic Claude 需要专用适配。 */
 enum class ApiProtocol { OPENAI, ANTHROPIC }
 
@@ -702,6 +727,24 @@ class ProviderClient @Inject constructor(
         }
         val dynamicMcp = runCatching { mcpManager.getActiveMcpTools() }.getOrDefault(emptyList())
         sessionConfig.applyGlobalReasoningDepth().copy(dynamicMcpTools = dynamicMcp)
+    }
+
+    /**
+     * Resolve an explicit agent model selection without silently falling back to the active model.
+     * The selection may be a saved profile id/name or one concrete model configured in a profile.
+     */
+    suspend fun resolveRequestedModel(
+        selection: String?,
+        inheritedProfileId: String? = null,
+        inheritedVariant: String? = null,
+    ): ModelConfig = withContext(Dispatchers.IO) {
+        val requested = selection?.trim()?.takeIf { it.isNotBlank() && !it.equals("inherit", ignoreCase = true) }
+            ?: return@withContext resolveConfigured(inheritedProfileId, inheritedVariant)
+        val profiles = modelDao.observeAll().first()
+        val target = selectRequestedModelTarget(profiles, requested) ?: throw IllegalArgumentException(
+            "未找到模型选择“$requested”。请传入已保存的模型档案 ID/名称，或档案中已配置的具体模型名。",
+        )
+        resolveConfigured(target.profileId, target.variant)
     }
 
     /**
@@ -1080,8 +1123,17 @@ class ProviderClient @Inject constructor(
                     name = "invoke_subagent",
                     description = "按研发部门和简短专业关键词从本地索引解析角色，并发派发隔离子智能体。候选目录不会进入主对话；只有最终命中的完整角色提示会进入对应子会话。",
                     parameters = Json.parseToJsonElement(
-                        """{"type":"object","properties":{"subagents":{"type":"array","description":"子任务列表","minItems":1,"maxItems":6,"items":{"type":"object","properties":{"taskName":{"type":"string","description":"简短子任务名称"},"department":{"type":"string","enum":["engineering","design","product","project-management","testing","security","game-development","spatial-computing","specialized"],"description":"先选研发部门，匹配严格限制在该部门"},"agentQuery":{"type":"string","minLength":2,"maxLength":80,"description":"2-5 个简短英文专业关键词，如 frontend react、mobile android、test automation；不要复制完整任务"},"role":{"type":"string","description":"可选：仅兼容已知 profile id/name 的精确覆盖；存在时优先于索引匹配"},"prompt":{"type":"string","description":"详细任务指令与交付要求"},"model":{"type":"string","description":"可选：指定执行该子任务的目标 AI 模型 ID、代号或简称（如 gpt-4o-mini、qwen-2.5-coder、claude-3-5-haiku、deepseek-chat 等）。不填或 inherit 则自动继承父会话模型"}},"required":["taskName","department","agentQuery","prompt"]}}},"required":["subagents"]}""",
+                        """{"type":"object","properties":{"subagents":{"type":"array","description":"子任务列表","minItems":1,"maxItems":6,"items":{"type":"object","properties":{"taskName":{"type":"string","description":"简短子任务名称"},"department":{"type":"string","enum":["engineering","design","product","project-management","testing","security","game-development","spatial-computing","specialized"],"description":"先选研发部门，匹配严格限制在该部门"},"agentQuery":{"type":"string","minLength":2,"maxLength":80,"description":"2-5 个简短英文专业关键词，如 frontend react、mobile android、test automation；不要复制完整任务"},"role":{"type":"string","description":"可选：仅兼容已知 profile id/name 的精确覆盖；存在时优先于索引匹配"},"prompt":{"type":"string","description":"详细任务指令与交付要求"},"model":{"type":"string","description":"可选：已保存模型档案的 ID/名称，或档案中已配置的具体模型名；无法解析时明确失败。不填或 inherit 则继承父会话模型"}},"required":["taskName","department","agentQuery","prompt"]}}},"required":["subagents"]}""",
 
+                    ).jsonObject,
+                ),
+            ),
+            ApiToolDefinition(
+                function = ApiFunctionDefinition(
+                    name = "invoke_dual_agent",
+                    description = "用物理隔离的 Planner/Executor 双智能体执行复杂多步骤任务。Planner 只规划验收，Executor 按 DAG 依赖并行使用工具；适合需要多阶段实施与验证的任务。",
+                    parameters = Json.parseToJsonElement(
+                        """{"type":"object","properties":{"prompt":{"type":"string","description":"需要双智能体完成的完整任务与验收标准"},"planner_model":{"type":"string","description":"可选：Planner 使用的已保存模型档案 ID/名称，或档案中已配置的具体模型名；省略则继承当前会话"},"executor_model":{"type":"string","description":"可选：Executor 使用的已保存模型档案 ID/名称，或档案中已配置的具体模型名；省略则继承当前会话"},"max_steps":{"type":"integer","minimum":1,"maximum":30,"description":"最大规划轮数，默认 10"}},"required":["prompt"]}""",
                     ).jsonObject,
                 ),
             ),

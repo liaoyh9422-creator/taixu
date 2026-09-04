@@ -1114,8 +1114,7 @@ class HarnessLoop @Inject constructor(
                             "ReasoningLength=${normalized.result.reasoningContent?.length ?: 0}, " +
                             "ToolCallsCount=${normalized.result.toolCalls.size}, " +
                             "TextToolCalls=${normalized.textToolCallCount}, " +
-                            "InvalidTextMarkers=${normalized.invalidMarkerCount}, " +
-                            "ScavengedToolCalls=${normalized.scavengedToolCallCount}",
+                            "InvalidTextMarkers=${normalized.invalidMarkerCount}",
                     )
                 },
                 persistAssistant = { normalized ->
@@ -1132,13 +1131,6 @@ class HarnessLoop @Inject constructor(
                         hasToolCalls = normalized.toolCalls.isNotEmpty(),
                     )
                     metrics.recordUsage(normalized.result.usage)
-                    if (normalized.scavengedToolCallCount > 0) {
-                        agentEventLogger.log(
-                            sessId,
-                            "ReasoningScavenge",
-                            "从 reasoning_content 打捞了 ${normalized.scavengedToolCallCount} 个遗漏工具调用（模型在思考流中完成推演但未写入正文）",
-                        )
-                    }
                     stateMirrors.setThinkingLive(sessId, false)
                 },
                 consumeFollowUps = {

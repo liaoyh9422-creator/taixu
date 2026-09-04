@@ -54,23 +54,22 @@ class ProviderResponseNormalizerTest {
     }
 
     @Test
-    fun `scavenges tool call from reasoning_content when content has none`() {
+    fun `never executes tool call mentioned only in reasoning_content`() {
         val reasoning = "I should read the file first: [[tool_call]]{\"name\":\"read\",\"arguments\":{\"path\":\"foo.txt\"}}[[/tool_call]]"
-        val result = ChatResult(content = "", toolCalls = emptyList(), reasoningContent = reasoning)
-        val normalized = normalizer.normalize(result, rawText = "", toolsEnabled = true)
-        assertEquals(1, normalized.toolCalls.size)
-        assertEquals("read", normalized.toolCalls.single().name)
-        assertEquals(1, normalized.scavengedToolCallCount)
+        val finalText = "I considered reading the file, but decided no tool should run."
+        val result = ChatResult(content = finalText, toolCalls = emptyList(), reasoningContent = reasoning)
+        val normalized = normalizer.normalize(result, rawText = finalText, toolsEnabled = true)
+        assertTrue(normalized.toolCalls.isEmpty())
+        assertEquals(finalText, normalized.displayText)
         assertFalse(normalized.hasUnresolvedMarkers)
     }
 
     @Test
-    fun `structured tool calls suppress scavenge even if reasoning contains markers`() {
+    fun `structured tool calls remain authoritative when reasoning contains markers`() {
         val structured = listOf(ApiToolCallSpec("call-1", "edit", "{\"path\":\"a.kt\"}"))
         val reasoning = "Deliberating: [[tool_call]]{\"name\":\"read\",\"arguments\":{\"path\":\"b.kt\"}}[[/tool_call]]"
         val result = ChatResult(content = "", toolCalls = structured, reasoningContent = reasoning)
         val normalized = normalizer.normalize(result, rawText = "", toolsEnabled = true)
         assertEquals(structured, normalized.toolCalls)
-        assertEquals(0, normalized.scavengedToolCallCount)
     }
-}
+}

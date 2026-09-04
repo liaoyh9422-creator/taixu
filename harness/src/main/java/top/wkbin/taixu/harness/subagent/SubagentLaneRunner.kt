@@ -61,13 +61,14 @@ class SubagentLaneRunner @Inject constructor(
         workspace: String,
         modelId: String? = null,
         modelVariant: String? = null,
+        modelConfig: top.wkbin.taixu.harness.ModelConfig? = null,
     ): SubagentLaneResult {
         val user = top.wkbin.taixu.harness.UserMessage(UUID.randomUUID().toString(), now(), prompt)
         val operationId = operations.acceptRun(sessionId, user, laneName)
         var toolCalls = 0
         var finalText = ""
         return try {
-            val configuredModel = providerClient.resolveConfigured(modelId, modelVariant)
+            val configuredModel = modelConfig ?: providerClient.resolveConfigured(modelId, modelVariant)
             val loopDetector = ToolCallLoopDetector()
             val maxRounds = runCatching { settingsDataStore.maxToolRounds.first() }
                 .getOrDefault(DEFAULT_MAX_ROUNDS)

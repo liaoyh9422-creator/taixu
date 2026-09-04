@@ -50,7 +50,7 @@ internal object HarnessApiMapper {
             lower == "history.search" || lower == "history_search" -> HarnessTool.HISTORY_SEARCH
             lower == "history.read" || lower == "history_read" -> HarnessTool.HISTORY_READ
             lower == "build_script" -> HarnessTool.BUILD_SCRIPT
-            lower == "invoke_subagent" || lower == "subagent" -> HarnessTool.SUBAGENT
+            lower == "invoke_subagent" || lower == "subagent" || lower == "invoke_dual_agent" -> HarnessTool.SUBAGENT
             lower == "load_rule" -> HarnessTool.LOAD_RULE
             trimmed.startsWith("mcp__") -> HarnessTool.MCP
             else -> HarnessTool.BASE
