@@ -98,6 +98,20 @@ sealed interface HarnessEvent {
         val permission: String,
         val reason: String,
     ) : HarnessEvent
+
+    /**
+     * 双智能体 Planner 规划步骤进度事件。
+     * UI 规划树/时间线卡片订阅此事件进行实时状态呈现（未开始、进行中、已完成、失败）。
+     */
+    data class PlanStepProgress(
+        override val sessionId: String,
+        override val timestamp: Long,
+        val stepId: String,
+        val title: String,
+        val status: String,
+        val dependencies: List<String> = emptyList(),
+        val resultSummary: String? = null,
+    ) : HarnessEvent
 }
 
 /**

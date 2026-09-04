@@ -1,4 +1,4 @@
-﻿package top.wkbin.taixu.harness.dual
+package top.wkbin.taixu.harness.dual
 
 import kotlinx.serialization.Serializable
 
@@ -11,9 +11,16 @@ data class PlanStep(
     val title: String,
     val instruction: String,
     val expectedOutcome: String = "",
+    val dependencies: List<String> = emptyList(),
     val status: StepStatus = StepStatus.PENDING,
     val resultSummary: String? = null,
-)
+) {
+    /**
+     * 判断当前步骤是否就绪（前置依赖的所有步骤均已 COMPLETED）。
+     */
+    fun isReady(completedStepIds: Set<String>): Boolean =
+        status == StepStatus.PENDING && dependencies.all { it in completedStepIds }
+}
 
 @Serializable
 enum class StepStatus {
@@ -41,6 +48,12 @@ data class StepExecutionResult(
  * Planner 面对当前执行进度做出的下一步决策。
  */
 sealed interface PlannerDecision {
+    /** 首轮或全局多步计划初始化 */
+    data class InitializePlan(
+        val thought: String = "",
+        val plan: List<PlanStep>,
+    ) : PlannerDecision
+
     /** 计划已就绪或继续执行下一单步 */
     data class ExecuteStep(
         val step: PlanStep,

@@ -1,4 +1,4 @@
-﻿package top.wkbin.taixu.harness.dual
+package top.wkbin.taixu.harness.dual
 
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -36,16 +36,34 @@ class PlannerPromptBuilder @Inject constructor() {
 ```json
 {
   "thought": "对当前进展的分析评估与规划考量",
-  "action": "EXECUTE_STEP | REPLAN | FINISH",
+  "action": "INIT_PLAN | EXECUTE_STEP | REPLAN | FINISH",
+  "plan": [
+    {
+      "id": "step_1",
+      "title": "简短步骤标题",
+      "instruction": "具体执行要求与目标，说明要查看/修改哪些文件或执行什么命令",
+      "expectedOutcome": "预期交付成果",
+      "dependencies": []
+    },
+    {
+      "id": "step_2",
+      "title": "依赖步骤标题",
+      "instruction": "具体要求",
+      "expectedOutcome": "预期交付成果",
+      "dependencies": ["step_1"]
+    }
+  ],
   "step": {
     "id": "step_1",
-    "title": "简短步骤标题",
-    "instruction": "具体执行要求与目标，说明要查看/修改哪些文件或执行什么命令",
-    "expectedOutcome": "预期交付成果"
+    "title": "单步执行时的步骤标题（若使用 EXECUTE_STEP）",
+    "instruction": "具体执行要求",
+    "expectedOutcome": "预期交付成果",
+    "dependencies": []
   },
   "finalReport": "仅在 action 为 FINISH 时提供完整总结"
 }
 ```
+- 说明：首轮规划可直接使用 `INIT_PLAN` 并给出 `plan` 列表；相互无依赖的步骤（`dependencies: []`）系统会自动并发执行以提升效率；单步推进可使用 `EXECUTE_STEP`；全部完成使用 `FINISH`。
 """.trimIndent())
     }
 }

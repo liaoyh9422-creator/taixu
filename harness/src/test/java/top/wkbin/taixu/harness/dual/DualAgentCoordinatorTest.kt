@@ -1,4 +1,4 @@
-﻿package top.wkbin.taixu.harness.dual
+package top.wkbin.taixu.harness.dual
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -85,6 +85,86 @@ class DualAgentCoordinatorTest {
     }
 
     @Test
+    fun `parses multi-step DAG plan array with dependencies from INIT_PLAN`() {
+        val responseText = """
+            ```json
+            {
+              "thought": "将任务拆解为3个子工序，其中前两项无依赖可并发执行",
+              "action": "INIT_PLAN",
+              "plan": [
+                {
+                  "id": "step_1",
+                  "title": "检查文件结构",
+                  "instruction": "ls -la",
+                  "expectedOutcome": "列出文件",
+                  "dependencies": []
+                },
+                {
+                  "id": "step_2",
+                  "title": "检查依赖配置",
+                  "instruction": "cat build.gradle",
+                  "expectedOutcome": "读取依赖",
+                  "dependencies": []
+                },
+                {
+                  "id": "step_3",
+                  "title": "综合构建验证",
+                  "instruction": "./gradlew build",
+                  "expectedOutcome": "构建通过",
+                  "dependencies": ["step_1", "step_2"]
+                }
+              ]
+            }
+            ```
+        """.trimIndent()
+
+        val decision = PlannerProtocolParser.parse(responseText, emptyList())
+        assertTrue(decision is PlannerDecision.InitializePlan)
+        val init = decision as PlannerDecision.InitializePlan
+        assertEquals(3, init.plan.size)
+
+        val step1 = init.plan[0]
+        val step2 = init.plan[1]
+        val step3 = init.plan[2]
+
+        // 验证就绪状态判断（DAG 就绪拓扑）
+        assertTrue(step1.isReady(emptySet()))
+        assertTrue(step2.isReady(emptySet()))
+        // step_3 依赖 step_1 与 step_2，未完成前不应就绪
+        assertTrue(!step3.isReady(emptySet()))
+        assertTrue(!step3.isReady(setOf("step_1")))
+        // 当前置依赖全部完成时，step_3 就绪
+        assertTrue(step3.isReady(setOf("step_1", "step_2")))
+    }
+
+    @Test
+    fun `parses replan decision with new plan array`() {
+        val responseText = """
+            ```json
+            {
+              "thought": "前置步骤发现旧方案不可行，重新编排后续两步工序",
+              "action": "REPLAN",
+              "plan": [
+                {
+                  "id": "step_alt_1",
+                  "title": "使用备用方案重构",
+                  "instruction": "refactor alternative",
+                  "dependencies": []
+                }
+              ]
+            }
+            ```
+        """.trimIndent()
+
+        val decision = PlannerProtocolParser.parse(responseText, emptyList())
+        assertTrue(decision is PlannerDecision.Replan)
+        val replan = decision as PlannerDecision.Replan
+        assertEquals("前置步骤发现旧方案不可行，重新编排后续两步工序", replan.reason)
+        assertEquals(1, replan.newSteps.size)
+        assertEquals("step_alt_1", replan.newSteps[0].id)
+    }
+
+    @Test
     fun `planner prompt builder is completely model agnostic and cache friendly`() {
         val prompt = promptBuilder.buildSystemPrompt("/workspace/my_project", "Android Kotlin")
         // 1. 不包含任何特定厂商专有名称（保证对 OpenAI, Claude, Gemini, DeepSeek, Qwen 等完全中立）
@@ -95,5 +175,6 @@ class DualAgentCoordinatorTest {
         assertTrue(prompt.contains("/workspace/my_project"))
         assertTrue(prompt.contains("Android Kotlin"))
         assertTrue(prompt.contains("Planner Agent"))
+        assertTrue(prompt.contains("dependencies"))
     }
 }

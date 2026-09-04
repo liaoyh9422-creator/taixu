@@ -1335,6 +1335,22 @@ private fun eventVisual(event: HarnessEvent): EventVisual = when (event) {
         stringResource(R.string.chat_event_permission_required, event.permission),
         event.reason,
     )
+    is HarnessEvent.PlanStepProgress -> EventVisual(
+        when (event.status) {
+            "COMPLETED" -> RuntimeIconName.Check
+            "FAILED" -> RuntimeIconName.Alert
+            "RUNNING" -> RuntimeIconName.Play
+            else -> RuntimeIconName.Sparkles
+        },
+        when (event.status) {
+            "COMPLETED" -> Color(0xFF2E7D32)
+            "FAILED" -> MaterialTheme.colorScheme.error
+            "RUNNING" -> MaterialTheme.colorScheme.primary
+            else -> Color(0xFF7C4DFF)
+        },
+        "工序 ${event.stepId} · ${event.title}",
+        event.resultSummary ?: "状态: ${event.status}",
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
