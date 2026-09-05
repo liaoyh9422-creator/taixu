@@ -17,6 +17,7 @@ import top.wkbin.taixu.runtime.RootfsUpdateInfo
 import top.wkbin.taixu.runtime.shell.CommandResult
 import top.wkbin.taixu.runtime.shell.ShellCommand
 import top.wkbin.taixu.runtime.shell.ManagedProcess
+import top.wkbin.taixu.runtime.bridge.adb.EmbeddedAdbManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +36,7 @@ class DeveloperViewModel @Inject constructor(
     private val toolRegistry: ToolRegistry,
     private val toolManager: ToolManager,
     private val logger: AppLogger,
+    private val embeddedAdbManager: EmbeddedAdbManager,
 ) : ViewModel() {
 
     val runtimeState: StateFlow<RuntimeState> = linuxRuntime.state
@@ -71,6 +73,73 @@ class DeveloperViewModel @Inject constructor(
     private val _rootfsUpdate = MutableStateFlow<RootfsUpdateInfo?>(null)
     val rootfsUpdate: StateFlow<RootfsUpdateInfo?> = _rootfsUpdate.asStateFlow()
     private var initializationJob: Job? = null
+
+    val adbState: StateFlow<EmbeddedAdbManager.ConnectionState> = embeddedAdbManager.state
+    val adbDiscovery: StateFlow<EmbeddedAdbManager.DiscoveryState> = embeddedAdbManager.discovery
+    private val _adbBusy = MutableStateFlow(false)
+    val adbBusy: StateFlow<Boolean> = _adbBusy.asStateFlow()
+    private val _adbMessage = MutableStateFlow<String?>(null)
+    val adbMessage: StateFlow<String?> = _adbMessage.asStateFlow()
+    private val _logcatOutput = MutableStateFlow("")
+    val logcatOutput: StateFlow<String> = _logcatOutput.asStateFlow()
+
+    fun pairWirelessAdb(code: String) {
+        if (_adbBusy.value) return
+        viewModelScope.launch {
+            _adbBusy.value = true
+            _adbMessage.value = "正在使用自动发现的配对端口进行安全配对…"
+            val result = embeddedAdbManager.pair(code.trim())
+            _adbMessage.value = result.fold(
+                onSuccess = { "配对并连接成功；密钥已安全保存，后续将自动发现端口并重连。" },
+                onFailure = { it.message ?: "无线 ADB 配对失败" },
+            )
+            _adbBusy.value = false
+        }
+    }
+
+    fun connectWirelessAdb() {
+        if (_adbBusy.value) return
+        viewModelScope.launch {
+            _adbBusy.value = true
+            _adbMessage.value = "正在连接自动发现的无线调试端口…"
+            val result = embeddedAdbManager.connect()
+            _adbMessage.value = result.fold(
+                onSuccess = { "无线 ADB 已连接。" },
+                onFailure = { it.message ?: "无线 ADB 连接失败" },
+            )
+            _adbBusy.value = false
+        }
+    }
+
+    fun captureLogcat(packageName: String, tag: String, priority: Char, keyword: String, lines: Int) {
+        if (_adbBusy.value) return
+        viewModelScope.launch {
+            _adbBusy.value = true
+            _adbMessage.value = "正在抓取日志…"
+            runCatching {
+                embeddedAdbManager.captureLogcat(
+                    EmbeddedAdbManager.LogcatRequest(packageName.trim(), tag.trim(), priority, keyword, lines),
+                )
+            }.onSuccess { result ->
+                _logcatOutput.value = result.output
+                _adbMessage.value = if (result.success) "日志抓取完成。" else result.output
+            }.onFailure { error ->
+                _adbMessage.value = error.message ?: "日志抓取失败"
+            }
+            _adbBusy.value = false
+        }
+    }
+
+    fun clearDeviceLogcat() {
+        if (_adbBusy.value) return
+        viewModelScope.launch {
+            _adbBusy.value = true
+            val result = embeddedAdbManager.clearLogcat()
+            if (result.success) _logcatOutput.value = ""
+            _adbMessage.value = if (result.success) "设备 Logcat 缓冲区已清空。" else result.output
+            _adbBusy.value = false
+        }
+    }
 
     val registryManifestUrl: StateFlow<String> = settingsDataStore.registryManifestUrl
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")

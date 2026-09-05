@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import top.wkbin.taixu.ui.components.RuntimeOutlinedButton as OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import top.wkbin.taixu.ui.components.RuntimeSwitch as Switch
 import top.wkbin.taixu.ui.developer.LocalizedText as Text
 import top.wkbin.taixu.ui.components.RuntimeTextButton as TextButton
@@ -53,6 +54,7 @@ import top.wkbin.taixu.ui.components.RuntimeIconName
 import top.wkbin.taixu.ui.components.RuntimeTopBar
 import top.wkbin.taixu.ui.components.SectionHeader
 import top.wkbin.taixu.ui.components.StatusBadge
+import top.wkbin.taixu.runtime.bridge.adb.EmbeddedAdbManager
 
 @Composable
 fun DeveloperScreen(
@@ -78,6 +80,11 @@ fun DeveloperScreen(
     val agentLoggingEnabled by viewModel.agentLoggingEnabled.collectAsStateWithLifecycle()
     val agentLogSize by viewModel.agentLogSize.collectAsStateWithLifecycle()
     val agentLogLocation by viewModel.agentLogLocation.collectAsStateWithLifecycle()
+    val adbState by viewModel.adbState.collectAsStateWithLifecycle()
+    val adbDiscovery by viewModel.adbDiscovery.collectAsStateWithLifecycle()
+    val adbBusy by viewModel.adbBusy.collectAsStateWithLifecycle()
+    val adbMessage by viewModel.adbMessage.collectAsStateWithLifecycle()
+    val logcatOutput by viewModel.logcatOutput.collectAsStateWithLifecycle()
     var manifestUrl by remember(savedManifestUrl) { mutableStateOf(savedManifestUrl) }
     var signatureUrl by remember(savedSignatureUrl) { mutableStateOf(savedSignatureUrl) }
     var publicKey by remember(savedPublicKey) { mutableStateOf(savedPublicKey) }
@@ -86,7 +93,17 @@ fun DeveloperScreen(
     var showResetConfirmation by remember { mutableStateOf(false) }
     var showAgentLogDialog by remember { mutableStateOf(false) }
     var agentLogText by remember { mutableStateOf("") }
+    var pairingCode by remember { mutableStateOf("") }
+    var logcatPackage by remember { mutableStateOf("") }
+    var logcatTag by remember { mutableStateOf("") }
+    var logcatKeyword by remember { mutableStateOf("") }
+    var logcatLines by remember { mutableStateOf("200") }
+    var logcatPriority by remember { mutableStateOf('V') }
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    LaunchedEffect(adbState) {
+        if (adbState is EmbeddedAdbManager.ConnectionState.Connected) pairingCode = ""
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -139,6 +156,143 @@ fun DeveloperScreen(
                     InfoRow("架构", result.architecture ?: "-")
                     Spacer(Modifier.height(8.dp))
                     InfoRow("工作区可写", if (result.workspaceWritable) "是" else "否")
+                }
+            }
+
+            SectionHeader("无线 ADB · Logcat", "mDNS 自动发现动态端口；成功配对一次后自动重连")
+            RuntimeCard(Modifier.fillMaxWidth()) {
+                val connected = adbState as? EmbeddedAdbManager.ConnectionState.Connected
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    IconTile(RuntimeIconName.Terminal)
+                    Column(Modifier.weight(1f)) {
+                        Text("内置无线 ADB", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            when (val current = adbState) {
+                                EmbeddedAdbManager.ConnectionState.Disconnected -> "未连接"
+                                EmbeddedAdbManager.ConnectionState.Discovering -> "正在通过 mDNS 发现端口"
+                                EmbeddedAdbManager.ConnectionState.Pairing -> "正在安全配对"
+                                EmbeddedAdbManager.ConnectionState.Connecting -> "正在连接"
+                                is EmbeddedAdbManager.ConnectionState.Connected -> "${current.host}:${current.port}"
+                                is EmbeddedAdbManager.ConnectionState.Failed -> current.message
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    StatusBadge(if (connected != null) "已连接" else "未就绪", if (connected != null) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "已发现：配对端口 ${adbDiscovery.pairingEndpoints.size} 个 · 连接端口 ${adbDiscovery.connectEndpoints.size} 个",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = pairingCode,
+                    onValueChange = { value -> pairingCode = value.filter(Char::isDigit).take(6) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("一次性 6 位配对码") },
+                    supportingText = { Text("先在系统“无线调试”中打开“使用配对码配对设备”；端口无需手填") },
+                    singleLine = true,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.pairWirelessAdb(pairingCode) },
+                        enabled = !adbBusy && pairingCode.length == 6 && adbDiscovery.pairingEndpoints.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) { Text("配对并连接") }
+                    OutlinedButton(
+                        onClick = viewModel::connectWirelessAdb,
+                        enabled = !adbBusy && adbDiscovery.connectEndpoints.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) { Text("重新连接") }
+                }
+                adbMessage?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                Spacer(Modifier.height(18.dp))
+                Text("应用日志抓取", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = logcatPackage,
+                    onValueChange = { logcatPackage = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("包名（留空抓取全部）") },
+                    singleLine = true,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = logcatTag,
+                        onValueChange = { logcatTag = it },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Tag（可选）") },
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = logcatLines,
+                        onValueChange = { logcatLines = it.filter(Char::isDigit).take(4) },
+                        modifier = Modifier.weight(0.55f),
+                        label = { Text("行数") },
+                        singleLine = true,
+                    )
+                }
+                OutlinedTextField(
+                    value = logcatKeyword,
+                    onValueChange = { logcatKeyword = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("关键词（可选，忽略大小写）") },
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    listOf('V', 'D', 'I', 'W', 'E', 'F').forEach { priority ->
+                        if (priority == logcatPriority) {
+                            Button(onClick = { logcatPriority = priority }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)) { Text(priority.toString()) }
+                        } else {
+                            OutlinedButton(onClick = { logcatPriority = priority }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)) { Text(priority.toString()) }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.captureLogcat(logcatPackage, logcatTag, logcatPriority, logcatKeyword, logcatLines.toIntOrNull() ?: 200) },
+                        enabled = connected != null && !adbBusy,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("抓取日志") }
+                    OutlinedButton(onClick = viewModel::clearDeviceLogcat, enabled = connected != null && !adbBusy) { Text("清空") }
+                }
+                if (logcatOutput.isNotBlank()) {
+                    Spacer(Modifier.height(12.dp))
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Text(
+                            logcatOutput,
+                            modifier = Modifier.padding(12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Logcat", logcatOutput))
+                            android.widget.Toast.makeText(context, "日志已复制", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("复制日志") }
                 }
             }
 

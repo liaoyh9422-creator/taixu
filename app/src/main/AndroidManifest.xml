@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- SSH 后台保活：持有 WifiLock 防止息屏/后台时 Wi-Fi 无线电源进入省电导致断连 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 无线 ADB：保持 mDNS 多播接收，自动发现动态配对端口与连接端口。 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

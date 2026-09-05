@@ -31,6 +31,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.UUID
+import top.wkbin.taixu.runtime.bridge.adb.EmbeddedAdbManager
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -40,9 +41,10 @@ import javax.inject.Singleton
  * 沙箱（PRoot）与 App 共享网络命名空间，因此沙箱内可通过 `127.0.0.1:7980` 访问本服务。
  *
  * 提供以下端点：
- * - `GET  /api/health`       — 桥接健康检查 + 当前特权状态
- * - `POST /api/install-apk`  — 在宿主侧调起系统安装器安装 APK（打破"沙箱无法安装 APK"限制）
- * - `POST /api/shell`        — 通过 Shizuku/Root 在宿主侧执行 Shell 命令（打破循环权限依赖）
+ * - `GET  /api/health`       — 桥接健康检查 + 当前特权状态与 ADB 状态
+ * - `POST /api/install-apk`  — 在宿主侧安装 APK（无线 ADB 静默安装或系统安装器）
+ * - `POST /api/shell`        — 在宿主侧执行 Shell 命令（Shizuku/Root 或内置无线 ADB）
+ * - `POST /api/logcat`       — 抓取目标应用或系统 Logcat 日志
  *
  * 安全：仅监听 127.0.0.1；所有写操作需 Bearer Token 认证（token 写入 /opt/taixu/.bridge-key）。
  */
@@ -51,6 +53,7 @@ class HostBridge @Inject constructor(
     @ApplicationContext private val context: Context,
     private val logger: AppLogger,
     private val privilegeManager: PrivilegeManager,
+    private val embeddedAdbManager: EmbeddedAdbManager,
 ) {
     companion object {
         const val BRIDGE_PORT = 7980
@@ -187,6 +190,8 @@ class HostBridge @Inject constructor(
                 handleInstallApk(request.body)
             request.method == "POST" && request.path.startsWith("/api/shell") ->
                 handleShell(request.body)
+            request.method == "POST" && request.path.startsWith("/api/logcat") ->
+                handleLogcat(request.body)
             else ->
                 HttpResponse(404, errorJson("Not found: ${request.method} ${request.path}"))
         }
@@ -202,21 +207,25 @@ class HostBridge @Inject constructor(
 
     private suspend fun handleHealth(): HttpResponse {
         val info = privilegeManager.getPrivilegeInfo()
+        val adbState = embeddedAdbManager.state.value
+        val adbConnected = adbState is EmbeddedAdbManager.ConnectionState.Connected
         val body = buildJsonObject {
             put("status", "ok")
             put("bridge", "1.0")
             put("port", BRIDGE_PORT)
             put("mode", info.mode.id)
             put("modeLabel", info.mode.shortLabel)
-            put("modeActive", info.modeActive)
+            put("modeActive", info.modeActive || adbConnected)
             put("shizuku", info.shizukuAvailable)
             put("root", info.rootAvailable)
-            put("shellSupported", info.shizukuAvailable || info.rootAvailable)
+            put("adb", adbConnected)
+            put("adbPort", (adbState as? EmbeddedAdbManager.ConnectionState.Connected)?.port ?: 0)
+            put("shellSupported", info.shizukuAvailable || info.rootAvailable || adbConnected)
         }.toString()
         return HttpResponse(200, body)
     }
 
-    private fun handleInstallApk(body: String): HttpResponse {
+    private suspend fun handleInstallApk(body: String): HttpResponse {
         val apkPath = try {
             val obj = json.parseToJsonElement(body).jsonObject
             obj["path"]?.jsonPrimitive?.content
@@ -236,6 +245,21 @@ class HostBridge @Inject constructor(
         }
         if (!apkFile.name.endsWith(".apk", ignoreCase = true)) {
             return HttpResponse(400, errorJson("File does not have .apk extension: ${apkFile.name}"))
+        }
+
+        // 优先通过内置无线 ADB 静默安装（无需点击系统弹窗确认）
+        val adbState = embeddedAdbManager.state.value
+        if (adbState is EmbeddedAdbManager.ConnectionState.Connected) {
+            val installResult = embeddedAdbManager.installApk(apkFile)
+            if (installResult.isSuccess) {
+                logger.i("HostBridge: APK installed via wireless ADB for $apkPath")
+                return HttpResponse(200, buildJsonObject {
+                    put("success", true)
+                    put("message", "APK 已通过无线 ADB 静默安装成功")
+                    put("package", apkFile.name)
+                    put("channel", "wireless-adb")
+                }.toString())
+            }
         }
 
         // 复制到 cache 目录（FileProvider 需要 cache-path 下的文件）
@@ -266,6 +290,7 @@ class HostBridge @Inject constructor(
                 put("success", true)
                 put("message", "安装请求已发送，请在系统弹窗中确认安装")
                 put("package", apkFile.name)
+                put("channel", "system-intent")
             }.toString())
         } catch (e: Exception) {
             cachedApk.delete()
@@ -285,15 +310,66 @@ class HostBridge @Inject constructor(
             return HttpResponse(400, errorJson("Missing 'command' field"))
         }
 
-        // 通过 PrivilegeManager 在宿主侧执行（Shizuku/Root）
-        val result = privilegeManager.executeShellCommand(command)
-        val responseJson = buildJsonObject {
-            put("success", result.success)
-            put("exitCode", result.exitCode)
-            put("stdout", result.stdout)
-            put("stderr", result.stderr)
+        val info = privilegeManager.getPrivilegeInfo()
+        val responseJson = if (info.modeActive && (info.shizukuAvailable || info.rootAvailable)) {
+            val result = privilegeManager.executeShellCommand(command)
+            buildJsonObject {
+                put("success", result.success)
+                put("exitCode", result.exitCode)
+                put("stdout", result.stdout)
+                put("stderr", result.stderr)
+                put("channel", "privilege")
+            }
+        } else {
+            val adbResult = embeddedAdbManager.executeShell(command)
+            buildJsonObject {
+                put("success", adbResult.success)
+                put("exitCode", adbResult.exitCode ?: if (adbResult.success) 0 else 1)
+                put("stdout", if (adbResult.success) adbResult.output else "")
+                put("stderr", if (!adbResult.success) adbResult.output else "")
+                put("channel", "wireless-adb")
+            }
         }
         return HttpResponse(200, responseJson.toString())
+    }
+
+    private suspend fun handleLogcat(body: String): HttpResponse {
+        val obj = try {
+            json.parseToJsonElement(body).jsonObject
+        } catch (e: Exception) {
+            return HttpResponse(400, errorJson("Invalid JSON body: ${e.message}"))
+        }
+
+        val clear = obj["clear"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
+        if (clear) {
+            val clearResult = embeddedAdbManager.clearLogcat()
+            return HttpResponse(200, buildJsonObject {
+                put("success", clearResult.success)
+                put("message", if (clearResult.success) "Logcat buffer cleared" else clearResult.output)
+            }.toString())
+        }
+
+        val pkg = obj["package"]?.jsonPrimitive?.content?.trim().orEmpty()
+        val tag = obj["tag"]?.jsonPrimitive?.content?.trim().orEmpty()
+        val priority = obj["priority"]?.jsonPrimitive?.content?.trim()?.uppercase()?.firstOrNull() ?: 'V'
+        val keyword = obj["keyword"]?.jsonPrimitive?.content?.trim().orEmpty()
+        val lines = obj["lines"]?.jsonPrimitive?.content?.toIntOrNull() ?: 200
+
+        val result = embeddedAdbManager.captureLogcat(
+            EmbeddedAdbManager.LogcatRequest(
+                packageName = pkg,
+                tag = tag,
+                priority = priority,
+                keyword = keyword,
+                lines = lines,
+            ),
+        )
+
+        return HttpResponse(200, buildJsonObject {
+            put("success", result.success)
+            put("exitCode", result.exitCode ?: if (result.success) 0 else 1)
+            put("output", result.output)
+        }.toString())
     }
 
     // ============================ 工具方法 ============================

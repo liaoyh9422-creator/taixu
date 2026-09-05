@@ -33,6 +33,7 @@ class RuntimePreferences @Inject constructor(private val store: SettingsDataStor
     val effectiveExecutionMode get() = store.effectiveExecutionMode
     val qemuCompatibilityEnabled get() = store.qemuCompatibilityEnabled
     val adbWirelessPort get() = store.adbWirelessPort
+    val adbPairedOnce get() = store.adbPairedOnce
     suspend fun readLegacyEnvironmentVariables() = store.readLegacyEnvironmentVariables()
     suspend fun clearLegacyEnvironmentVariables() = store.clearLegacyEnvironmentVariables()
     suspend fun setSelectedDistribution(value: String) = store.setSelectedDistribution(value)
@@ -45,6 +46,7 @@ class RuntimePreferences @Inject constructor(private val store: SettingsDataStor
         effective: top.wkbin.taixu.core.model.ExecutionMode,
     ) = store.setExecutionModes(preferred, effective)
     suspend fun setQemuCompatibilityEnabled(value: Boolean) = store.setQemuCompatibilityEnabled(value)
+    suspend fun setAdbWirelessPort(value: Int) = store.setAdbWirelessPort(value)
     suspend fun setAdbPairedOnce(value: Boolean) = store.setAdbPairedOnce(value)
 }
 

@@ -53,6 +53,11 @@ dependencyResolutionManagement {
             google()
             mavenCentral()
         }
+        // Kadb 的 SPAKE2 Android 实现仅发布在 JitPack；限制到精确 group，避免扩大依赖解析面。
+        maven {
+            url = uri("https://jitpack.io")
+            content { includeGroup("com.github.Flyfish233") }
+        }
     }
 }
 

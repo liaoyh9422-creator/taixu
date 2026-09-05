@@ -62,6 +62,16 @@
 | `runtime/.../WorkspaceFileService.kt` | 工作区读/写/搜/hash/zip/share | 与 file.* 工具对齐 |
 | `runtime/.../shell/VT100.kt` | 终端 VT100 状态机 | 终端渲染 |
 
+## 📱 内置无线 ADB 与 Logcat
+
+| 模块 | 关键文件 | 职责 |
+| --- | --- | --- |
+| `runtime/.../bridge/adb/EmbeddedAdbManager.kt` | Kadb 客户端 + mDNS 发现 + 持久密钥 | 自动发现 `_adb-tls-pairing` / `_adb-tls-connect`、一次配对、自动重连、Logcat 抓取 |
+| `runtime/.../bridge/HostBridge.kt` | 沙箱 HTTP 桥接 (127.0.0.1:7980) | 提供 `/api/logcat`、`/api/shell`（内置无线 ADB 回退）与静默 APK 安装 |
+| `app/src/main/assets/bin/logcat-grabber` | 沙箱内置 CLI 日志工具 | `logcat-grabber` / `logcat-tail` / `logcat-export` 脚本资产 |
+| `feature/developer/.../DeveloperScreen.kt` | 无线 ADB 与日志控制台 | 配对码输入、连接状态、包名/Tag/优先级/关键词过滤与日志复制 |
+| `harness/ToolExecutor.kt` | `host.logcat` 分派 | 优先使用无线 ADB，失败后回退 Shizuku/Root |
+
 ## 🤝 Web Reverse MCP 参考
 
 项目内置浏览器/MCP 设计借鉴自 `mnjh666/WebReverse-MCP`（模块切分 / 工具动词集 / 风险矩阵），不复用其代码。

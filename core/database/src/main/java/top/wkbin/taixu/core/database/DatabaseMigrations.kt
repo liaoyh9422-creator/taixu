@@ -181,3 +181,78 @@ val MIGRATION_44_45 = object : Migration(44, 45) {
         db.execSQL("ALTER TABLE agent_subagents ADD COLUMN defaultModelVariant TEXT DEFAULT null")
     }
 }
+
+/**
+ * 修复 v45 schema hash 不一致问题：
+ * 先前 session 安装的 APK 携带了一个未记录的中间态 agent_tasks schema
+ * （identityHash: 2e093ad32ea2eac8760797ede44e8110）。
+ *
+ * 此迁移重建 agent_tasks 表（保留数据），并补齐 agent_subagents 可能缺失的
+ * defaultModelId / defaultModelVariant 列（幂等，已存在则跳过）。
+ */
+val MIGRATION_45_46 = object : Migration(45, 46) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // ① 重建 agent_tasks，保证 schema 与 v46 entity 完全一致
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS agent_tasks_new (
+                `id` TEXT NOT NULL,
+                `sessionId` TEXT NOT NULL DEFAULT '',
+                `title` TEXT NOT NULL,
+                `description` TEXT NOT NULL,
+                `status` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                `updatedAt` INTEGER NOT NULL,
+                `errorMessage` TEXT,
+                `progress` REAL NOT NULL,
+                `operationId` TEXT,
+                `startedAt` INTEGER,
+                `completedAt` INTEGER,
+                `nextRunAt` INTEGER,
+                `attemptCount` INTEGER NOT NULL DEFAULT 0,
+                `maxAttempts` INTEGER NOT NULL DEFAULT 2,
+                `autoResume` INTEGER NOT NULL DEFAULT 1,
+                `lastRound` INTEGER NOT NULL DEFAULT 0,
+                `maxRounds` INTEGER NOT NULL DEFAULT 0,
+                `statusDetail` TEXT,
+                PRIMARY KEY(`id`)
+            )
+            """.trimIndent(),
+        )
+        // 迁移已有行（仅迁移公共列，新增列使用 DEFAULT）
+        db.execSQL(
+            """
+            INSERT OR IGNORE INTO agent_tasks_new
+                (id, sessionId, title, description, status, createdAt, updatedAt,
+                 errorMessage, progress, operationId, startedAt, completedAt,
+                 nextRunAt, attemptCount, maxAttempts, autoResume, lastRound, maxRounds, statusDetail)
+            SELECT
+                id,
+                COALESCE(sessionId, '') AS sessionId,
+                title, description, status, createdAt, updatedAt,
+                errorMessage, progress, operationId, startedAt, completedAt,
+                nextRunAt,
+                COALESCE(attemptCount, 0), COALESCE(maxAttempts, 2),
+                COALESCE(autoResume, 1), COALESCE(lastRound, 0), COALESCE(maxRounds, 0),
+                statusDetail
+            FROM agent_tasks
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE agent_tasks")
+        db.execSQL("ALTER TABLE agent_tasks_new RENAME TO agent_tasks")
+        // 重建索引
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_tasks_status ON agent_tasks(status)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_tasks_updatedAt ON agent_tasks(updatedAt)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_tasks_sessionId ON agent_tasks(sessionId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_tasks_nextRunAt ON agent_tasks(nextRunAt)")
+
+        // ② 补齐 agent_subagents 列（已存在时 SQLite 会报错，用 runCatching 保护）
+        runCatching {
+            db.execSQL("ALTER TABLE agent_subagents ADD COLUMN defaultModelId TEXT DEFAULT null")
+        }
+        runCatching {
+            db.execSQL("ALTER TABLE agent_subagents ADD COLUMN defaultModelVariant TEXT DEFAULT null")
+        }
+    }
+}
+

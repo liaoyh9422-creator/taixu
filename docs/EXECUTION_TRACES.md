@@ -130,5 +130,28 @@ WorkspaceScreen / ToolCenterScreen
 WorkspaceBuildRunner
   └─► build_android.sh / build_flutter.sh
         ├─► 清理 local.properties 中遗留 ndk.dir，不再写回
-        └─► --no-daemon --max-workers=2 ➔ 构建与产物校验
+                    └─► --no-daemon --max-workers=2 ➔ 构建与产物校验
+```
+
+---
+
+## 9. 无线 ADB 自动发现与日志抓取 (Wireless ADB / Logcat)
+
+```text
+DeveloperScreen
+  └─► EmbeddedAdbManager
+        ├─► NsdManager/mDNS 发现 _adb-tls-pairing._tcp 与 _adb-tls-connect._tcp
+        ├─► 首次输入 6 位配对码 ➔ TLS + SPAKE2+ 配对 ➔ 私钥写入应用私有目录
+        ├─► 后续启动发现连接端口 ➔ 自动复用持久密钥重连
+        └─► shell UID 执行 logcat（包名 PID / Tag / 优先级 / 关键词过滤）
+
+Harness host(action=logcat)
+  ├─► 优先 EmbeddedAdbManager（无需 Shizuku/Root）
+  └─► 无线 ADB 不可用时回退 PrivilegeManager
+
+PRoot 沙箱 /opt/taixu/bin/logcat-grabber & taixu-host logcat
+  └─► HostBridge (127.0.0.1:7980)
+        ├─► POST /api/logcat ➔ EmbeddedAdbManager.captureLogcat()
+        ├─► POST /api/shell ➔ 内置无线 ADB 回退（无 Shizuku 亦可执行 Shell）
+        └─► POST /api/install-apk ➔ 内置无线 ADB 静默安装（连通时免系统弹窗）
 ```

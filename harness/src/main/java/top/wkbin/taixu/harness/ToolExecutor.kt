@@ -18,6 +18,7 @@ import top.wkbin.taixu.runtime.privilege.BinderOutcome
 import top.wkbin.taixu.runtime.privilege.PrivilegeManager
 import top.wkbin.taixu.runtime.privilege.ShizukuSystemApis
 import top.wkbin.taixu.runtime.apps.AndroidAppManager
+import top.wkbin.taixu.runtime.bridge.adb.EmbeddedAdbManager
 import top.wkbin.taixu.core.database.AndroidAppRepository
 import top.wkbin.taixu.core.model.ExecutionMode
 import java.util.UUID
@@ -65,6 +66,7 @@ class ToolExecutor @Inject constructor(
     private val promptRouter: top.wkbin.taixu.harness.prompt.PromptRouter? = null,
     private val checkpointStore: top.wkbin.taixu.harness.checkpoint.CheckpointStore? = null,
     private val dualAgentCoordinator: top.wkbin.taixu.harness.dual.DualAgentCoordinator? = null,
+    private val embeddedAdbManager: EmbeddedAdbManager? = null,
 ) {
     @Inject
     lateinit var settingsDataStore: AgentPreferences
@@ -234,8 +236,33 @@ class ToolExecutor @Inject constructor(
     /** 宿主 Android 特权通道；权限在每次执行前实时复核，不能仅依赖启动时快照。 */
     @OptIn(InternalCoroutinesApi::class)
     private suspend fun executeHost(args: JsonObject, operationId: String?, sessionId: String): Pair<Boolean, String> {
-        val manager = privilegeManager ?: return false to "未初始化宿主权限执行器"
         val action = requireString(args, "action").trim().lowercase()
+
+        // Logcat 优先走内置无线 ADB，不依赖 Shizuku/Root；不可用时再回退原特权通道。
+        if (action == "logcat" && embeddedAdbManager != null) {
+            val adbResult = embeddedAdbManager.captureLogcat(
+                EmbeddedAdbManager.LogcatRequest(
+                    packageName = args["package"]?.jsonPrimitive?.content?.trim().orEmpty(),
+                    tag = args["tag"]?.jsonPrimitive?.content?.trim().orEmpty(),
+                    priority = args["priority"]?.jsonPrimitive?.content?.trim()?.uppercase()?.firstOrNull() ?: 'V',
+                    keyword = args["keyword"]?.jsonPrimitive?.content?.trim().orEmpty(),
+                    lines = optionalLong(args, "tail_lines", 200L, 1L, 2_000L).toInt(),
+                ),
+            )
+            if (adbResult.success) {
+                return true to "mode wireless-adb · exit ${adbResult.exitCode ?: 0}\n${adbResult.output.trim()}"
+            }
+            val fallbackManager = privilegeManager ?: return false to adbResult.output.ifBlank {
+                "无线 ADB 未连接；请在开发者控制台开启无线调试并完成一次配对。"
+            }
+            val info = fallbackManager.getPrivilegeInfo()
+            if (info.mode == ExecutionMode.PROOT || !info.modeActive) {
+                return false to adbResult.output.ifBlank {
+                    "无线 ADB 未连接；请在开发者控制台开启无线调试并完成一次配对。"
+                }
+            }
+        }
+        val manager = privilegeManager ?: return false to "未初始化宿主权限执行器"
 
         // settings_put system 命名空间优先走 Android ContentResolver API（需 WRITE_SETTINGS），
         // 避免 Shizuku shell 在部分国产 ROM 上被 SettingsProvider 静默拒绝（exit 22）。

@@ -50,6 +50,6 @@ dependencies {
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
     implementation(libs.hiddenapi.bypass)
-    implementation(libs.dadb)
+    implementation(libs.kadb)
     testImplementation(libs.junit)
 }
