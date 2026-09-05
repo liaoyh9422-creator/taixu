@@ -50,19 +50,42 @@ extensions.configure<ApplicationExtension> {
         keystoreProperties.load(FileInputStream(keystorePropertiesFile))
     }
 
+    fun signingValue(environmentVariable: String, propertyName: String): String? =
+        System.getenv(environmentVariable)?.takeIf { it.isNotBlank() }
+            ?: keystoreProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
+
+    val signingStoreFilePath = signingValue("TAIXU_RELEASE_STORE_FILE", "storeFile")
+    val signingStorePassword = signingValue("TAIXU_RELEASE_STORE_PASSWORD", "storePassword")
+    val signingKeyAlias = signingValue("TAIXU_RELEASE_KEY_ALIAS", "keyAlias")
+    val signingKeyPassword = signingValue("TAIXU_RELEASE_KEY_PASSWORD", "keyPassword")
+    val signingValues = listOf(
+        signingStoreFilePath,
+        signingStorePassword,
+        signingKeyAlias,
+        signingKeyPassword,
+    )
+    //noinspection WrongGradleMethod
+    val signingRequested = signingValues.any { it != null }
+    //noinspection WrongGradleMethod
+    val signingConfigured = signingValues.all { it != null }
+    check(!signingRequested || signingConfigured) {
+        "Release signing is only partially configured. Provide all TAIXU_RELEASE_* environment variables " +
+            "or all entries in keystore.properties."
+    }
+
     signingConfigs {
         create("release") {
-            if (keystorePropertiesFile != null) {
-                val storeFilePath = keystoreProperties.getProperty("storeFile") ?: ""
+            if (signingConfigured) {
+                val storeFilePath = requireNotNull(signingStoreFilePath)
                 val resolvedStoreFile = if (storeFilePath.startsWith("/") || storeFilePath.contains(":\\")) {
                     file(storeFilePath)
                 } else {
                     rootProject.file(storeFilePath).takeIf { it.exists() } ?: project.file(storeFilePath)
                 }
                 storeFile = resolvedStoreFile
-                storePassword = keystoreProperties.getProperty("storePassword")
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
             }
         }
     }
@@ -85,7 +108,7 @@ extensions.configure<ApplicationExtension> {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            if (keystorePropertiesFile != null) {
+            if (signingConfigured) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }

@@ -38,17 +38,39 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > release.jks
-          # 构建脚本只读取 keystore.properties，必须写入该文件而非 gradle.properties
-          cat > keystore.properties <<EOF
-          storeFile=$(pwd)/release.jks
-          storePassword=${{ secrets.RELEASE_STORE_PASSWORD }}
-          keyAlias=${{ secrets.RELEASE_KEY_ALIAS }}
-          keyPassword=${{ secrets.RELEASE_KEY_PASSWORD }}
-          EOF
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::RELEASE_KEYSTORE_BASE64 is not configured"
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          if [ ! -s "$RUNNER_TEMP/release.jks" ]; then
+            echo "::error::Decoded release keystore is empty"
+            exit 1
+          fi
+          echo "TAIXU_RELEASE_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
       - name: Build Release APK
+        env:
+          TAIXU_RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          TAIXU_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          TAIXU_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          for variable in \
+            TAIXU_RELEASE_STORE_FILE \
+            TAIXU_RELEASE_STORE_PASSWORD \
+            TAIXU_RELEASE_KEY_ALIAS \
+            TAIXU_RELEASE_KEY_PASSWORD; do
+            if [ -z "${!variable:-}" ]; then
+              echo "::error::$variable is not configured"
+              exit 1
+            fi
+          done
+          keytool -list \
+            -keystore "$TAIXU_RELEASE_STORE_FILE" \
+            -storepass:env TAIXU_RELEASE_STORE_PASSWORD \
+            -alias "$TAIXU_RELEASE_KEY_ALIAS" > /dev/null
           ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Identify and Rename Output APK
