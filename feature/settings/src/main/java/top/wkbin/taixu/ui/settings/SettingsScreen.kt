@@ -869,6 +869,7 @@ private fun EnvironmentVariableEditor(
 fun SystemDevSettingsScreen(
     onBack: () -> Unit,
     onOpenDeveloper: () -> Unit,
+    onOpenAdbLogcat: () -> Unit = {},
     onOpenCustomIteration: () -> Unit = {},
     onOpenPermissionGuide: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
@@ -973,6 +974,24 @@ fun SystemDevSettingsScreen(
                             showPhantomProcessDialog = true
                             viewModel.refreshPhantomProcessLimit()
                         },
+                    )
+                }
+            }
+
+            item {
+                Text(
+                    text = "Android 系统调试与日志",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+                )
+                SettingsGroup {
+                    SettingsRow(
+                        icon = RuntimeIconName.Terminal,
+                        title = "无线 ADB 与日志抓取",
+                        subtitle = "mDNS 自动配对发现、免配对自动重连与 Logcat 实时工作台",
+                        value = "进入工作台",
+                        onClick = onOpenAdbLogcat,
                     )
                 }
             }
