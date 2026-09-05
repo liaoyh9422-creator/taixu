@@ -9,6 +9,11 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 val appVersionName = "0.10.0"
 val appVersionCode = 16
 
+// TaiXuDev 双包构建开关：CI（.github/workflows/taixudev-build.yml）设 TAIXU_DEV_BUILD=1 时，
+// 产出独立预览包 top.wkbin.taixu.dev / 应用名 TaiXuDev / 版本后缀 -dev，
+// 与正式版（top.wkbin.taixu）及本地调试包（top.wkbin.taixu.debug）完全共存互不干扰。
+val taiXuDevBuild = System.getenv("TAIXU_DEV_BUILD") == "1"
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.serialization)
@@ -25,11 +30,13 @@ extensions.configure<ApplicationExtension> {
     ndkVersion = "30.0.15729638"
 
     defaultConfig {
-        applicationId = "top.wkbin.taixu"
+        applicationId = if (taiXuDevBuild) "top.wkbin.taixu.dev" else "top.wkbin.taixu"
         minSdk = 29
         targetSdk = 37
         versionCode = appVersionCode
         versionName = appVersionName
+        // 应用名统一走 manifest placeholder：TaiXuDev 构建显示 "TaiXuDev"，其余显示 "太墟"。
+        manifestPlaceholders["appLabel"] = if (taiXuDevBuild) "TaiXuDev" else "太墟"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += "arm64-v8a"
@@ -62,12 +69,16 @@ extensions.configure<ApplicationExtension> {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".debug"
-            versionNameSuffix = "-debug"
-            manifestPlaceholders["appLabel"] = "太墟 (Debug)"
+            // TaiXuDev 双包构建：包名与应用名已在 defaultConfig 按 taiXuDevBuild 分流，
+            // 此处只控制后缀——本地调试包保持 top.wkbin.taixu.debug/-debug，
+            // TaiXuDev 预览包（top.wkbin.taixu.dev）不再叠加额外后缀，版本后缀为 -dev。
+            if (!taiXuDevBuild) {
+                applicationIdSuffix = ".debug"
+            }
+            versionNameSuffix = if (taiXuDevBuild) "-dev" else "-debug"
         }
         release {
-            manifestPlaceholders["appLabel"] = "太墟"
+            manifestPlaceholders["appLabel"] = if (taiXuDevBuild) "TaiXuDev" else "太墟"
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -196,7 +207,7 @@ val bundledPtyNative = layout.projectDirectory.file(
     "src/main/jniLibs/arm64-v8a/libpty_native.so",
 )
 val bundledRtk = layout.projectDirectory.file("src/main/assets/bin/rtk")
-val bundledRtkSha256 = "e440fc61077925d98fdea5c6bf817df2c3c85e6b96aea5d02659c2a6f42d93ce"
+val bundledRtkSha256 = "ce9a4847940ea26169df818d6907cd99bac0257a59ed4cc6c4b647e41277ad94"
 
 tasks.configureEach {
     if (name == "preBuild") {
