@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -248,6 +249,7 @@ private fun ModelEditorContent(
         )
     }
     var customModelInput by rememberSaveable(modelId, providerId) { mutableStateOf("") }
+    var modelSearchQuery by rememberSaveable(modelId, providerId) { mutableStateOf("") }
     var url by rememberSaveable(modelId) { mutableStateOf(existing?.baseUrl ?: provider.baseUrl) }
     // API Key 列表等复杂结构用 listSaver
     val stringListSaver = listSaver<List<String>, String>(save = { it.toList() }, restore = { it })
@@ -282,6 +284,9 @@ private fun ModelEditorContent(
 
     val candidateModels = remember(discovered, provider) {
         (discovered + provider.recommendedModels).distinct().filter { it.isNotBlank() }
+    }
+    val filteredCandidateModels = remember(candidateModels, modelSearchQuery) {
+        filterCandidateModels(candidateModels, modelSearchQuery)
     }
 
     // 高级与推理参数
@@ -772,48 +777,94 @@ private fun ModelEditorContent(
                             }
                         }
 
-                        // 流式布局自动横向换行；限制最大高度，模型过多时区域内部滚动，避免撑爆单 item 导致底部黑屏
-                        FlowRow(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 360.dp)
-                                .verticalScroll(candidateScrollState),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            candidateModels.forEach { option ->
-                                val isSelected = selectedModels.contains(option)
-                                Surface(
-                                    color = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh,
-                                    shape = RoundedCornerShape(10.dp),
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                                    ),
-                                    modifier = Modifier.clickable {
-                                        selectedModels = if (isSelected) selectedModels - option else selectedModels + option
-                                    },
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        OutlinedTextField(
+                            value = modelSearchQuery,
+                            onValueChange = { modelSearchQuery = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("搜索模型名称或 ID") },
+                            singleLine = true,
+                            shape = compactFieldShape,
+                            colors = fieldColors,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            leadingIcon = {
+                                RuntimeIcon(
+                                    name = RuntimeIconName.Search,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            },
+                            trailingIcon = {
+                                if (modelSearchQuery.isNotEmpty()) {
+                                    RuntimeIconButton(
+                                        onClick = { modelSearchQuery = "" },
+                                        contentDescription = "清空模型搜索",
                                     ) {
-                                        if (isSelected) {
-                                            RuntimeIcon(
-                                                name = RuntimeIconName.Check,
-                                                modifier = Modifier.size(13.dp),
-                                                tint = MaterialTheme.colorScheme.primary,
+                                        RuntimeIcon(
+                                            name = RuntimeIconName.Close,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            },
+                            supportingText = {
+                                if (modelSearchQuery.isNotBlank()) {
+                                    Text("找到 ${filteredCandidateModels.size} / $candidateCount 个模型")
+                                }
+                            },
+                        )
+
+                        // 流式布局自动横向换行；限制最大高度，模型过多时区域内部滚动，避免撑爆单 item 导致底部黑屏
+                        if (filteredCandidateModels.isEmpty()) {
+                            Text(
+                                text = "没有匹配的模型，可清空搜索或在下方手动填写模型 ID",
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            FlowRow(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 360.dp)
+                                    .verticalScroll(candidateScrollState),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                filteredCandidateModels.forEach { option ->
+                                    val isSelected = selectedModels.contains(option)
+                                    Surface(
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                                        ),
+                                        modifier = Modifier.clickable {
+                                            selectedModels = if (isSelected) selectedModels - option else selectedModels + option
+                                        },
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            if (isSelected) {
+                                                RuntimeIcon(
+                                                    name = RuntimeIconName.Check,
+                                                    modifier = Modifier.size(13.dp),
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                )
+                                            }
+                                            Text(
+                                                text = option,
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                                    fontSize = 12.sp,
+                                                ),
+                                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         }
-                                        Text(
-                                            text = option,
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                                                fontSize = 12.sp,
-                                            ),
-                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
                                     }
                                 }
                             }
@@ -1236,6 +1287,15 @@ private fun ModelEditorContent(
                 }
             }
         }
+    }
+}
+
+internal fun filterCandidateModels(models: List<String>, query: String): List<String> {
+    val normalizedQuery = query.trim()
+    return if (normalizedQuery.isEmpty()) {
+        models
+    } else {
+        models.filter { it.contains(normalizedQuery, ignoreCase = true) }
     }
 }
 
