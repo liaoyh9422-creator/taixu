@@ -273,6 +273,8 @@ class AndroidInAppBrowserEngine(
         val tabIds = pool.list().map { it.tabId }
         pool.shutdown()
         tabIds.forEach { screenshotRecorder.cleanup(it) }
+        // 截图线程由 recorder 自己持有：不在这里 quit 就会随每次引擎重建各留一个常驻线程。
+        screenshotRecorder.shutdown()
     }
 
     // ===== 注入式 Hook 引擎（阶段 1）=====

@@ -18,6 +18,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -35,7 +36,19 @@ import kotlin.time.Duration.Companion.milliseconds
  */
 class ScreenshotRecorder(private val context: Context) {
 
-    private val ioThread by lazy { HandlerThread("taixu-browser-screenshot").apply { start() } }
+    /**
+     * 资源归属：本类创建 HandlerThread，就必须自己 quit —— 引擎每次注销重建都会 new 一个
+     * Recorder（[top.wkbin.taixu.runtime.browser.BrowserRegistryImpl.shutdown] 会清空引擎列表），
+     * 不回收就是一轮一个常驻线程。用显式 [Lazy] 而不是 `by lazy` 是为了让 [shutdown]
+     * 能区分“线程真的起过”和“从未截图”，后者不该被 shutdown 反向唤起。
+     */
+    private val ioThreadDelegate = lazy {
+        HandlerThread("taixu-browser-screenshot").apply {
+            isDaemon = true
+            start()
+        }
+    }
+    private val ioThread by ioThreadDelegate
     private val ioHandler by lazy { Handler(ioThread.looper) }
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -82,7 +95,7 @@ class ScreenshotRecorder(private val context: Context) {
             lateRecycleScope.launch { deferred.await()?.recycle() }
             return null
         }
-        val file = writePngAsync(tabId, bmp)
+        val file = writePngAsync(tabId, bmp) ?: return null
         return ToolImageRef(
             id = UUID.randomUUID().toString(),
             uri = file,
@@ -93,12 +106,14 @@ class ScreenshotRecorder(private val context: Context) {
         )
     }
 
-    private suspend fun writePngAsync(tabId: String, bmp: Bitmap): String {
+    private suspend fun writePngAsync(tabId: String, bmp: Bitmap): String? {
         val dir = File(context.cacheDir, "taixu-browser/screenshots/$tabId").apply { mkdirs() }
         val filename = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date()) + ".png"
         val file = File(dir, filename)
         val done = CompletableDeferred<String>()
-        ioHandler.post {
+        // shutdown 之后 looper 已退出，post 返回 false：必须在这里回收并放弃，
+        // 否则 done 永远不会完成，调用方协程会永久挂起。
+        val posted = ioHandler.post {
             runCatching {
                 FileOutputStream(file).use { out ->
                     bmp.compress(Bitmap.CompressFormat.PNG, 90, out)
@@ -106,6 +121,10 @@ class ScreenshotRecorder(private val context: Context) {
             }
             bmp.recycle()
             done.complete(file.absolutePath)
+        }
+        if (!posted) {
+            bmp.recycle()
+            return null
         }
         // 挂起等待压缩完成：不再 runBlocking 阻塞 MCP 工作线程，也保留取消传播
         return done.await()
@@ -117,5 +136,18 @@ class ScreenshotRecorder(private val context: Context) {
             val dir = File(context.cacheDir, "taixu-browser/screenshots/$tabId")
             if (dir.exists()) dir.deleteRecursively()
         }
+    }
+
+    /**
+     * 释放本类持有的线程与协程作用域。引擎 shutdown 时调用；未截过图时不会唤起 lazy 线程。
+     *
+     * 正在进行的压缩会被 [HandlerThread.quitSafely] 保留到执行完（已入队的消息照常处理），
+     * 之后再 post 会被拒绝并由 [writePngAsync] 回收 Bitmap。
+     */
+    fun shutdown() {
+        if (ioThreadDelegate.isInitialized()) {
+            ioThread.quitSafely()
+        }
+        lateRecycleScope.cancel()
     }
 }

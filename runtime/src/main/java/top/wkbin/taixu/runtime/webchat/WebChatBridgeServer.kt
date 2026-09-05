@@ -9,9 +9,9 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -71,7 +71,6 @@ class WebChatBridgeServer @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var httpServer: AndroidHttpServer? = null
-    private val executor = Executors.newFixedThreadPool(8)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
     private val _status = MutableStateFlow(WebChatServerStatus())
     val status: StateFlow<WebChatServerStatus> = _status.asStateFlow()
@@ -87,7 +86,9 @@ class WebChatBridgeServer @Inject constructor(
         if (_status.value.isRunning) return true
         return try {
             val generatedPin = pin ?: generatePin()
-            val server = AndroidHttpServer.create(InetSocketAddress(port), 0).also { it.executor = executor }
+            // 工作线程池由 AndroidHttpServer 自己持有：stop() 时随服务一起回收，
+            // 不再让本类持有一个永不 shutdown 的 fixedThreadPool。
+            val server = AndroidHttpServer.create(InetSocketAddress(port), 0)
             server.createContext("/webchat/api/session/bootstrap", SessionBootstrapHandler())
             server.createContext("/webchat/api/bootstrap", BootstrapHandler())
             server.createContext("/webchat/api/conversations", ConversationsHandler())
@@ -152,6 +153,34 @@ class WebChatBridgeServer @Inject constructor(
         _status.value = _status.value.copy(activeConnections = sseEmitters.size)
     }
 
+    /**
+     * 请求协程的统一兜底。handler 在 [scope] 里异步执行，抛出的异常不会回到
+     * [AndroidHttpServer] 的 accept 循环，socket 会连同工作线程一起挂住：
+     * 这里保证异常路径也回一个 500 并最终关闭连接（[AndroidHttpExchange.close] 幂等）。
+     *
+     * 返回 Unit 而不是 Job：调用点是 `override fun handle(...) = launchRequest(...) { }`，
+     * 返回 Job 会迫使每个 handler 末尾补一个 `.let { }` 才能满足 Unit 覆写。
+     */
+    private fun launchRequest(
+        exchange: AndroidHttpExchange,
+        block: suspend CoroutineScope.() -> Unit,
+    ) {
+        scope.launch {
+            try {
+                block()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (throwable: Throwable) {
+                logger.e("太墟智枢 Web 请求处理失败：${exchange.requestURI.path}", throwable)
+                if (!exchange.isResponseStarted) {
+                    runCatching { sendJson(exchange, 500, errorJson(throwable.message ?: "请求处理失败")) }
+                }
+            } finally {
+                runCatching { exchange.close() }
+            }
+        }
+    }
+
     private inner class StaticAssetHandler : AndroidHttpHandler {
         override fun handle(exchange: AndroidHttpExchange) {
             val path = exchange.requestURI.path.removePrefix("/").trimStart('/')
@@ -168,18 +197,18 @@ class WebChatBridgeServer @Inject constructor(
     }
 
     private inner class SessionBootstrapHandler : AndroidHttpHandler {
-        override fun handle(exchange: AndroidHttpExchange) = scope.launch {
-            if (handlePreflight(exchange)) return@launch
+        override fun handle(exchange: AndroidHttpExchange) = launchRequest(exchange) {
+            if (handlePreflight(exchange)) return@launchRequest
             val token = requestJson(exchange)["token"]?.jsonPrimitive?.content.orEmpty()
             if (token != _status.value.pinCode) sendJson(exchange, 401, errorJson("配对码不正确"))
             else sendJson(exchange, 200, buildJsonObject { put("authenticated", true) })
-        }.let { }
+        }
     }
 
     private inner class BootstrapHandler : AndroidHttpHandler {
-        override fun handle(exchange: AndroidHttpExchange) = scope.launch {
-            if (handlePreflight(exchange)) return@launch
-            if (!requireAuthenticated(exchange)) return@launch
+        override fun handle(exchange: AndroidHttpExchange) = launchRequest(exchange) {
+            if (handlePreflight(exchange)) return@launchRequest
+            if (!requireAuthenticated(exchange)) return@launchRequest
             val configuredModels = models.observeAll().firstValue()
             // 与 ChatViewModel 一致先播种内置短语，避免聊天页从未打开时列表为空
             runCatching { quickPhrases.ensureInitialized() }
@@ -217,13 +246,13 @@ class WebChatBridgeServer @Inject constructor(
                     put("root", buildJsonObject { put("path", "/workspace") })
                 })
             })
-        }.let { }
+        }
     }
 
     private inner class ConversationsHandler : AndroidHttpHandler {
-        override fun handle(exchange: AndroidHttpExchange) = scope.launch {
-            if (handlePreflight(exchange)) return@launch
-            if (!requireAuthenticated(exchange)) return@launch
+        override fun handle(exchange: AndroidHttpExchange) = launchRequest(exchange) {
+            if (handlePreflight(exchange)) return@launchRequest
+            if (!requireAuthenticated(exchange)) return@launchRequest
             try {
                 val suffix = exchange.requestURI.path.substringAfter("/conversations", "").trim('/')
                 val parts = suffix.split('/').filter(String::isNotBlank)
@@ -283,7 +312,7 @@ class WebChatBridgeServer @Inject constructor(
             } catch (throwable: Throwable) {
                 sendJson(exchange, 400, errorJson(throwable.message ?: "会话操作失败"))
             }
-        }.let { }
+        }
     }
 
     private suspend fun startRun(exchange: AndroidHttpExchange, sessionId: String) {
@@ -336,9 +365,9 @@ class WebChatBridgeServer @Inject constructor(
     }
 
     private inner class TasksHandler : AndroidHttpHandler {
-        override fun handle(exchange: AndroidHttpExchange) = scope.launch {
-            if (handlePreflight(exchange)) return@launch
-            if (!requireAuthenticated(exchange)) return@launch
+        override fun handle(exchange: AndroidHttpExchange) = launchRequest(exchange) {
+            if (handlePreflight(exchange)) return@launchRequest
+            if (!requireAuthenticated(exchange)) return@launchRequest
             val suffix = exchange.requestURI.path.substringAfter("/tasks", "").trim('/')
             val parts = suffix.split('/').filter(String::isNotBlank)
             if (parts.size == 2 && parts[1] == "cancel" && exchange.requestMethod == "POST") {
@@ -349,7 +378,7 @@ class WebChatBridgeServer @Inject constructor(
             } else {
                 sendText(exchange, 404, "任务接口不存在")
             }
-        }.let { }
+        }
     }
 
     private inner class SseEventsHandler : AndroidHttpHandler {
@@ -371,9 +400,9 @@ class WebChatBridgeServer @Inject constructor(
     }
 
     private inner class WorkspacesHandler : AndroidHttpHandler {
-        override fun handle(exchange: AndroidHttpExchange) = scope.launch {
-            if (handlePreflight(exchange)) return@launch
-            if (!requireAuthenticated(exchange)) return@launch
+        override fun handle(exchange: AndroidHttpExchange) = launchRequest(exchange) {
+            if (handlePreflight(exchange)) return@launchRequest
+            if (!requireAuthenticated(exchange)) return@launchRequest
             try {
                 val suffix = exchange.requestURI.path.substringAfter("/workspaces", "").trim('/')
                 when {
@@ -386,7 +415,7 @@ class WebChatBridgeServer @Inject constructor(
             } catch (throwable: Throwable) {
                 sendJson(exchange, 400, errorJson(throwable.message ?: "工作区操作失败"))
             }
-        }.let { }
+        }
     }
 
     private suspend fun listWorkspace(exchange: AndroidHttpExchange) {
