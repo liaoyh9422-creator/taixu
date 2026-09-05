@@ -91,6 +91,7 @@ fun McpSettingsScreen(
     val connectionStates by viewModel.mcpConnectionStates.collectAsStateWithLifecycle()
     val browserGates by viewModel.browserGates.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
+    var showLocalDiscoveryDialog by remember { mutableStateOf(false) }
     var viewingDetailServer by remember { mutableStateOf<McpServerConfig?>(null) }
     // 待确认删除的服务 id（破坏性操作二次确认）；McpServerConfig 非 Parcelable，仅保存 id
     var pendingDeleteServerId by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
@@ -168,6 +169,17 @@ fun McpSettingsScreen(
                         ) {
                             RuntimeIcon(RuntimeIconName.Refresh, Modifier.size(16.dp), MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        TextButton(
+                            onClick = {
+                                showLocalDiscoveryDialog = true
+                                viewModel.discoverLocalMcpServers()
+                            },
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                RuntimeIcon(RuntimeIconName.Search, Modifier.size(14.dp), MaterialTheme.colorScheme.primary)
+                                Text("探测本机", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
                         TextButton(onClick = { showAddDialog = true }) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 RuntimeIcon(RuntimeIconName.Plus, Modifier.size(14.dp), MaterialTheme.colorScheme.primary)
@@ -241,6 +253,15 @@ fun McpSettingsScreen(
         )
     }
 
+    if (showLocalDiscoveryDialog) {
+        LocalMcpDiscoveryDialog(
+            state = viewModel.localMcpDiscovery.collectAsStateWithLifecycle().value,
+            onDismiss = { showLocalDiscoveryDialog = false },
+            onRetry = viewModel::discoverLocalMcpServers,
+            onAdd = viewModel::saveMcpServer,
+        )
+    }
+
     pendingDeleteServer?.let { server ->
         RuntimeAlertDialog(
             onDismissRequest = { pendingDeleteServerId = null },
@@ -282,6 +303,101 @@ fun McpSettingsScreen(
             },
         )
     }
+}
+
+/** 仅展示已通过 MCP 协议握手的 127.0.0.1 服务；用户确认后才写入配置。 */
+@Composable
+private fun LocalMcpDiscoveryDialog(
+    state: LocalMcpDiscoveryState,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onAdd: (McpServerConfig) -> Unit,
+) {
+    var addedIds by remember { mutableStateOf(emptySet<String>()) }
+    RuntimeAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("探测本机 MCP", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "正在检查 127.0.0.1 的监听端口，并用 MCP 协议验证。仅显示真正可用的服务，不会自动添加。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                when (state) {
+                    LocalMcpDiscoveryState.Idle, LocalMcpDiscoveryState.Scanning -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(20.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Text("正在探测本机服务…", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    is LocalMcpDiscoveryState.Error -> {
+                        Text(state.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                    is LocalMcpDiscoveryState.Results -> {
+                        if (state.servers.isEmpty()) {
+                            Text(
+                                "没有发现可用的本机 MCP 服务。请确认服务已启动，并监听在 127.0.0.1。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            state.servers.forEach { detected ->
+                                RuntimeCard(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                    contentPadding = PaddingValues(10.dp),
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                            Text(
+                                                detected.serverUrl,
+                                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                "已验证 · ${detected.toolCount} 个工具",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        if (detected.server.id in addedIds) {
+                                            Text("已添加", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    onAdd(detected.server)
+                                                    addedIds = addedIds + detected.server.id
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            ) { Text("添加", style = MaterialTheme.typography.labelSmall) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            when (state) {
+                LocalMcpDiscoveryState.Scanning -> Unit
+                else -> Button(onClick = onRetry) { Text("重新探测") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }
 
 /**

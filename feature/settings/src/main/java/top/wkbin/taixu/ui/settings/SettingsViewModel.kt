@@ -41,6 +41,11 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.util.UUID
 import java.util.zip.ZipInputStream
@@ -431,6 +436,41 @@ class SettingsViewModel @Inject constructor(
 
     suspend fun testMcpServer(server: top.wkbin.taixu.core.model.McpServerConfig): Result<List<top.wkbin.taixu.core.model.McpToolInfo>> {
         return mcpManager.testServer(server)
+    }
+
+    private val _localMcpDiscovery = MutableStateFlow<LocalMcpDiscoveryState>(LocalMcpDiscoveryState.Idle)
+    /** 127.0.0.1 上已完成 MCP 握手的服务；仅用于设置页展示，不会自动写入配置。 */
+    val localMcpDiscovery: StateFlow<LocalMcpDiscoveryState> = _localMcpDiscovery.asStateFlow()
+
+    /**
+     * 从本机监听 socket 中寻找候选端口，并以 MCP initialize + tools/list 确认真正的服务。
+     * 不做全端口扫描：既避免无意义的连接风暴，也不会碰触任何非本机地址。
+     */
+    fun discoverLocalMcpServers() {
+        viewModelScope.launch {
+            _localMcpDiscovery.value = LocalMcpDiscoveryState.Scanning
+            val existingUrls = mcpServers.value.map { it.serverUrl.trimEnd('/') }.toSet()
+            val candidates = withContext(Dispatchers.IO) { localLoopbackMcpCandidates() }
+                .filterNot { it.serverUrl.trimEnd('/') in existingUrls }
+            try {
+                val probeLimiter = Semaphore(4)
+                val found = candidates.map { candidate ->
+                    async(Dispatchers.IO) {
+                        val tools = probeLimiter.withPermit {
+                            kotlinx.coroutines.withTimeoutOrNull(6_000) {
+                                mcpManager.testServer(candidate.server).getOrNull()
+                            }
+                        }
+                        tools?.let { candidate.copy(toolCount = it.size) }
+                    }
+                }.awaitAll().filterNotNull().sortedBy { it.serverUrl }
+                _localMcpDiscovery.value = LocalMcpDiscoveryState.Results(found)
+            } catch (throwable: Throwable) {
+                _localMcpDiscovery.value = LocalMcpDiscoveryState.Error(
+                    throwable.message ?: "本机 MCP 探测失败",
+                )
+            }
+        }
     }
 
     /** 用户首选模式；即使本次启动降级也保留，用于下次自动恢复。 */
@@ -1308,6 +1348,56 @@ class SettingsViewModel @Inject constructor(
     fun resetQuickPhrasesToDefault() {
         viewModelScope.launch {
             quickPhraseRepository.resetToDefault()
+        }
+    }
+}
+
+sealed interface LocalMcpDiscoveryState {
+    data object Idle : LocalMcpDiscoveryState
+    data object Scanning : LocalMcpDiscoveryState
+    data class Results(val servers: List<DetectedLocalMcpServer>) : LocalMcpDiscoveryState
+    data class Error(val message: String) : LocalMcpDiscoveryState
+}
+
+data class DetectedLocalMcpServer(
+    val server: top.wkbin.taixu.core.model.McpServerConfig,
+    val toolCount: Int,
+) {
+    val serverUrl: String get() = server.serverUrl
+}
+
+/** 从 Linux proc socket 表提取可由 127.0.0.1 访问的监听端口。 */
+private fun localLoopbackMcpCandidates(): List<DetectedLocalMcpServer> {
+    val ports = linkedSetOf<Int>()
+    listOf("/proc/net/tcp", "/proc/net/tcp6").forEach { path ->
+        runCatching { File(path).readLines() }.getOrDefault(emptyList()).drop(1).forEach { line ->
+            val fields = line.trim().split(Regex("\\s+"))
+            val local = fields.getOrNull(1) ?: return@forEach
+            if (fields.getOrNull(3) != "0A") return@forEach // TCP_LISTEN
+            val address = local.substringBefore(':')
+            val port = local.substringAfter(':', "").toIntOrNull(16) ?: return@forEach
+            val loopbackOrAny = address == "0100007F" || address.all { it == '0' } || address.endsWith("00000001")
+            if (loopbackOrAny && port in 1..65535) ports += port
+        }
+    }
+    // 某些 Android 版本会限制 /proc 可见性；保留常见开发端口作为小范围回退。
+    if (ports.isEmpty()) ports += listOf(3000, 3001, 4000, 5000, 5173, 8000, 8080, 8787, 9000)
+
+    return ports.take(32).flatMap { port ->
+        listOf("mcp", "sse").map { path ->
+            val url = "http://127.0.0.1:$port/$path"
+            DetectedLocalMcpServer(
+                server = top.wkbin.taixu.core.model.McpServerConfig(
+                    id = "local_probe_${port}_$path",
+                    name = "本机 MCP ($port)",
+                    description = "在 127.0.0.1:$port 上自动探测到的 MCP 服务",
+                    transportType = top.wkbin.taixu.core.model.McpTransportType.SSE,
+                    serverUrl = url,
+                    isEnabled = true,
+                    isBuiltin = false,
+                ),
+                toolCount = 0,
+            )
         }
     }
 }
