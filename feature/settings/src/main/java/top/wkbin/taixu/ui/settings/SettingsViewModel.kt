@@ -928,12 +928,15 @@ class SettingsViewModel @Inject constructor(
         name: String,
         description: String,
         systemPrompt: String,
+        defaultModelId: String?,
+        defaultModelVariant: String?,
     ) {
         val normalizedId = roleId.trim().lowercase()
             .replace(Regex("[^a-z0-9_-]+"), "_")
             .trim('_')
         val trimmedName = name.trim()
         val trimmedPrompt = systemPrompt.trim()
+        val normalizedDefaultModelId = defaultModelId?.trim()?.takeIf { it.isNotBlank() }
         if (normalizedId.isBlank() || trimmedName.isBlank() || trimmedPrompt.isBlank()) return
         viewModelScope.launch {
             val profile = top.wkbin.taixu.core.model.AgentSubagent(
@@ -941,6 +944,10 @@ class SettingsViewModel @Inject constructor(
                 name = trimmedName,
                 description = description.trim().ifBlank { "自定义子智能体角色" },
                 systemPrompt = trimmedPrompt,
+                defaultModelId = normalizedDefaultModelId,
+                defaultModelVariant = normalizedDefaultModelId?.let {
+                    defaultModelVariant?.trim()?.takeIf { variant -> variant.isNotBlank() }
+                },
                 departmentId = previous?.departmentId ?: top.wkbin.taixu.core.model.AgentDepartments.CUSTOM_ID,
                 isEnabled = previous?.isEnabled ?: true,
                 isBuiltin = previous?.isBuiltin ?: false,

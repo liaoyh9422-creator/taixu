@@ -9,6 +9,10 @@ data class AgentSubagent(
     val name: String,
     val description: String,
     val systemPrompt: String,
+    /** Saved model profile used by default; null means inherit the parent session model. */
+    val defaultModelId: String? = null,
+    /** Concrete model within the saved profile; null uses that profile's first configured model. */
+    val defaultModelVariant: String? = null,
     val departmentId: String = AgentDepartments.CUSTOM_ID,
     val isEnabled: Boolean = true,
     val isBuiltin: Boolean = true,

@@ -22,6 +22,8 @@ data class AgentSubagentEntity(
     val name: String,
     val description: String,
     val systemPrompt: String,
+    @ColumnInfo(defaultValue = "null") val defaultModelId: String? = null,
+    @ColumnInfo(defaultValue = "null") val defaultModelVariant: String? = null,
     @ColumnInfo(defaultValue = "'custom'") val departmentId: String,
     val isEnabled: Boolean,
     val isBuiltin: Boolean,
@@ -102,10 +104,15 @@ interface AgentSubagentDao {
     suspend fun syncBuiltinCatalog(revision: String, defaults: List<AgentSubagentEntity>) {
         val settings = getSettings()
         if (settings?.catalogRevision == revision) return
-        val enabledById = listBuiltin().associate { it.id to it.isEnabled }
+        val preferencesById = listBuiltin().associateBy { it.id }
         deleteBuiltin()
         upsertAll(defaults.map { profile ->
-            profile.copy(isEnabled = enabledById[profile.id] ?: profile.isEnabled)
+            val saved = preferencesById[profile.id]
+            profile.copy(
+                isEnabled = saved?.isEnabled ?: profile.isEnabled,
+                defaultModelId = saved?.defaultModelId ?: profile.defaultModelId,
+                defaultModelVariant = saved?.defaultModelVariant ?: profile.defaultModelVariant,
+            )
         })
         upsertSettings((settings ?: AgentSubagentSettingsEntity()).copy(catalogRevision = revision))
     }
@@ -183,6 +190,8 @@ private fun AgentSubagentEntity.toModel(): AgentSubagent = AgentSubagent(
     name = name,
     description = description,
     systemPrompt = systemPrompt,
+    defaultModelId = defaultModelId,
+    defaultModelVariant = defaultModelVariant,
     departmentId = departmentId,
     isEnabled = isEnabled,
     isBuiltin = isBuiltin,
@@ -194,6 +203,8 @@ private fun AgentSubagent.toEntity(): AgentSubagentEntity = AgentSubagentEntity(
     name = name,
     description = description,
     systemPrompt = systemPrompt,
+    defaultModelId = defaultModelId,
+    defaultModelVariant = defaultModelVariant,
     departmentId = departmentId,
     isEnabled = isEnabled,
     isBuiltin = isBuiltin,

@@ -113,7 +113,7 @@ class SubagentArgsParserTest {
     }
 
     @Test
-    fun `tasks without writePaths default to whole workspace lease`() {
+    fun `tasks without writePaths default to read-only`() {
         val args = jsonObject(
             """{"subagents":{"taskName":"审查","role":"reviewer","prompt":"审查"}}""",
         )
@@ -138,7 +138,16 @@ class SubagentArgsParserTest {
         assertEquals(3, result.size)
         assertEquals("qwen-2.5-coder-32b", result[0].model)
         assertEquals("gpt-4o-mini", result[1].model)
-        assertEquals(null, result[2].model) // inherit should be normalized to null (inherit from parent)
+        assertEquals("inherit", result[2].model) // Preserve explicit parent override over a role default.
+    }
+
+    @Test
+    fun `accepts snake case write paths for compatibility`() {
+        val args = jsonObject(
+            """{"subagents":{"taskName":"实现","role":"coder","prompt":"修改","write_paths":["app/src"]}}""",
+        )
+
+        assertEquals(listOf("app/src"), SubagentArgsParser.parse(args).single().writePaths)
     }
 
     private fun jsonObject(raw: String) = Json.parseToJsonElement(raw).jsonObject

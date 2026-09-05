@@ -84,6 +84,20 @@ class AgencyAgentCatalogLoaderTest {
                     sortOrder = 10_000,
                 ),
             )
+            dao.upsert(
+                AgentSubagentEntity(
+                    id = "agency_engineering_frontend_developer",
+                    name = "Old Frontend Developer",
+                    description = "old catalog entry",
+                    systemPrompt = "old prompt",
+                    defaultModelId = "profile-coder",
+                    defaultModelVariant = "coder-v2",
+                    departmentId = "engineering",
+                    isEnabled = true,
+                    isBuiltin = true,
+                    sortOrder = 1,
+                ),
+            )
             dao.upsertSettings(AgentSubagentSettingsEntity())
 
             val repository = AgentSubagentRepository(dao, loader)
@@ -97,6 +111,15 @@ class AgencyAgentCatalogLoaderTest {
             assertFalse(profiles.any { it.id == "researcher" })
             assertTrue(profiles.any { it.id == "my_custom_agent" && !it.isBuiltin })
             assertEquals(136, profiles.count { it.isBuiltin })
+            assertTrue(
+                profiles.any {
+                    it.id == "agency_engineering_frontend_developer" &&
+                        it.isEnabled &&
+                        it.defaultModelId == "profile-coder" &&
+                        it.defaultModelVariant == "coder-v2" &&
+                        it.systemPrompt.startsWith("# Frontend Developer Agent Personality")
+                },
+            )
             assertEquals(137, routingIndex.size)
             assertTrue(routingIndex.all { it.description.isNotBlank() })
             assertEquals(59, departmentCounts["engineering"])

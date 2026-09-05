@@ -2,6 +2,7 @@ package top.wkbin.taixu.harness
 
 import top.wkbin.taixu.core.database.AgentContextRepository
 import top.wkbin.taixu.core.database.HarnessSessionRepository
+import top.wkbin.taixu.core.common.logging.AppLogger
 import top.wkbin.taixu.core.model.AgentSubagent
 import top.wkbin.taixu.core.model.AgentSubagentIndexEntry
 import top.wkbin.taixu.core.model.SubagentTaskSpec
@@ -46,6 +47,7 @@ class SubagentOrchestrator @Inject constructor(
     private val agentContextRepo: AgentContextRepository,
     private val fileAccess: WorkspaceFileAccess,
     private val providerClient: ProviderClient,
+    private val logger: AppLogger,
 ) {
     /**
      * Application-wide budget: a three-agent fan-out should actually run three lanes at once,
@@ -76,9 +78,21 @@ class SubagentOrchestrator @Inject constructor(
 
         // 写租约协调：把任务按 write_paths 冲突切成若干"写不冲突"的波。
         // 同一波内的写路径互不相交 → 可并行（受 globalParallelism 约束）；跨波顺序执行。
-        // 未声明 write_paths 的任务按"整工作区租约"处理 → 自身独占一波 → 串行。
+        // 未声明 writePaths 的任务为只读任务，可彼此并行；["*"] 才表示整工作区独占写租约。
         val results = mutableListOf<SubagentExecutionOutcome>()
-        for (wave in buildWriteCleanWaves(specs)) {
+        val waves = buildWriteCleanWaves(specs)
+        logger.logAgent(
+            parentSessionId,
+            "SubagentSchedule",
+            "tasks=${specs.size}, waves=${waves.size}, maxParallelism=$DEFAULT_MAX_CONCURRENT_SUBAGENTS, " +
+                "waveSizes=${waves.joinToString(prefix = "[", postfix = "]") { it.size.toString() }}",
+        )
+        for ((waveIndex, wave) in waves.withIndex()) {
+            logger.logAgent(
+                parentSessionId,
+                "SubagentWave",
+                "start=${waveIndex + 1}/${waves.size}, tasks=${wave.joinToString { it.taskName }}",
+            )
             results += wave.map { spec ->
                 async {
                     globalParallelism.withPermit {
@@ -88,8 +102,10 @@ class SubagentOrchestrator @Inject constructor(
             }.awaitAll()
         }
 
-        val summaryMarkdown = paginateSummary(results, workspace)
-        val anySuccess = results.any { it.isSuccess }
+        // Completion order and lease waves must not change the user-requested presentation order.
+        val orderedResults = results.sortedBy { outcome -> specs.indexOf(outcome.spec) }
+        val summaryMarkdown = paginateSummary(orderedResults, workspace)
+        val anySuccess = orderedResults.any { it.isSuccess }
         anySuccess to summaryMarkdown
     }
 
@@ -113,7 +129,11 @@ class SubagentOrchestrator @Inject constructor(
             )
         }
         val targetModel = runCatching {
-            providerClient.resolveRequestedModel(spec.model, modelId, modelVariant)
+            when (val route = selectSubagentModel(spec.model, profile.defaultModelId, profile.defaultModelVariant)) {
+                SubagentModelRoute.Inherit -> providerClient.resolveRequestedModel(null, modelId, modelVariant)
+                is SubagentModelRoute.Requested -> providerClient.resolveRequestedModel(route.selection, modelId, modelVariant)
+                is SubagentModelRoute.RoleDefault -> providerClient.resolveSavedModelProfile(route.profileId, route.variant)
+            }
         }.getOrElse { failure ->
             return SubagentExecutionOutcome(
                 spec = spec,
@@ -182,10 +202,13 @@ class SubagentOrchestrator @Inject constructor(
         parentSessionId: String,
     ): String {
         val factsPack = buildParentFactsPack(parentSessionId, workspace)
-        val writeLine = if (spec.writePaths.isNotEmpty()) {
-            "限定写入范围（请只在这些文件/目录下写，勿越界）：${spec.writePaths.joinToString("、")}"
-        } else {
-            "未限定写入范围：请仅在你的任务所需范围内修改文件，避免覆盖其他并行子任务的工作成果。"
+        val writeLine = when {
+            spec.writePaths.isEmpty() ->
+                "本任务为只读任务：禁止调用 write/edit，禁止执行会修改工作区的命令；只返回分析或数据。"
+            spec.writePaths.any(::isWholeWorkspacePath) ->
+                "本任务持有整工作区独占写租约；仅修改任务确实需要的文件，避免无关改动。"
+            else ->
+                "限定写入范围（请只在这些文件/目录下写，勿越界）：${spec.writePaths.joinToString("、")}"
         }
         return promptAssets.render(
             "prompts/subagent_task.md",
@@ -246,30 +269,62 @@ class SubagentOrchestrator @Inject constructor(
     )
 }
 
+internal sealed interface SubagentModelRoute {
+    data object Inherit : SubagentModelRoute
+    data class Requested(val selection: String) : SubagentModelRoute
+    data class RoleDefault(val profileId: String, val variant: String?) : SubagentModelRoute
+}
+
+/** Explicit `inherit` bypasses a role default; an omitted task selection uses that default. */
+internal fun selectSubagentModel(
+    taskSelection: String?,
+    roleDefaultModelId: String?,
+    roleDefaultModelVariant: String?,
+): SubagentModelRoute {
+    val requested = taskSelection?.trim().orEmpty()
+    if (requested.equals("inherit", ignoreCase = true)) return SubagentModelRoute.Inherit
+    if (requested.isNotBlank()) return SubagentModelRoute.Requested(requested)
+    val profileId = roleDefaultModelId?.trim().orEmpty()
+    return if (profileId.isNotBlank()) {
+        SubagentModelRoute.RoleDefault(profileId, roleDefaultModelVariant?.trim()?.takeIf { it.isNotBlank() })
+    } else {
+        SubagentModelRoute.Inherit
+    }
+}
+
 
 /**
  * 将任务按 write_paths 冲突切成若干互不相交的"波"。
  * 同一波内所有任务的写路径集合互不重叠 → 可安全并行执行。
- * 空 writePaths 的任务视为"整工作区租约" → 与一切任务冲突 → 独占一波（串行）。
+ * 空 writePaths 是只读任务，可与其他只读任务并行；["*"] 是整工作区独占写租约。
+ * 为避免读到写入中间态，只读波与任何写入波分离；局部写路径互不冲突时可并行。
  */
 internal fun buildWriteCleanWaves(specs: List<SubagentTaskSpec>): List<List<SubagentTaskSpec>> {
     val waves = mutableListOf<MutableList<SubagentTaskSpec>>()
-    val waveIsWhole = mutableListOf<Boolean>()       // 该波是否持整工作区租约
+    val waveKinds = mutableListOf<SubagentWaveKind>()
     val wavePaths = mutableListOf<MutableSet<String>>() // 该波已占用的写路径
     for (spec in specs) {
         val paths = spec.writePaths.mapTo(hashSetOf()) { normalizeWritePath(it) }
-        val specIsWhole = paths.isEmpty()
-        val joinIndex = if (specIsWhole) {
-            null
-        } else {
-            waves.indices.firstOrNull { i -> !waveIsWhole[i] && wavePaths[i].intersect(paths).isEmpty() }
+        val kind = when {
+            paths.isEmpty() -> SubagentWaveKind.READ_ONLY
+            paths.any(::isWholeWorkspacePath) -> SubagentWaveKind.WHOLE_WORKSPACE
+            else -> SubagentWaveKind.SCOPED_WRITE
         }
-        if (joinIndex != null && joinIndex >= 0) {
+        val joinIndex = waves.indices.firstOrNull { i ->
+            when (kind) {
+                SubagentWaveKind.READ_ONLY -> waveKinds[i] == SubagentWaveKind.READ_ONLY
+                SubagentWaveKind.WHOLE_WORKSPACE -> false
+                SubagentWaveKind.SCOPED_WRITE ->
+                    waveKinds[i] == SubagentWaveKind.SCOPED_WRITE &&
+                        wavePaths[i].none { existing -> paths.any { candidate -> writePathsConflict(existing, candidate) } }
+            }
+        }
+        if (joinIndex != null) {
             waves[joinIndex].add(spec)
             wavePaths[joinIndex].addAll(paths)
         } else {
             waves.add(mutableListOf(spec))
-            waveIsWhole.add(specIsWhole)
+            waveKinds.add(kind)
             wavePaths.add(paths)
         }
     }
@@ -277,7 +332,18 @@ internal fun buildWriteCleanWaves(specs: List<SubagentTaskSpec>): List<List<Suba
 }
 
 /** 规范化写路径，统一去掉首尾斜杠，保证跨子任务的路径比较稳定。 */
-internal fun normalizeWritePath(path: String): String = path.trim().trim('/')
+internal fun normalizeWritePath(path: String): String = path.trim().replace('\\', '/').trim('/').removeSuffix("/.")
+
+private enum class SubagentWaveKind { READ_ONLY, SCOPED_WRITE, WHOLE_WORKSPACE }
+
+private fun isWholeWorkspacePath(path: String): Boolean = normalizeWritePath(path) in setOf("*", ".")
+
+internal fun writePathsConflict(left: String, right: String): Boolean {
+    val a = normalizeWritePath(left)
+    val b = normalizeWritePath(right)
+    if (isWholeWorkspacePath(a) || isWholeWorkspacePath(b)) return true
+    return a == b || a.startsWith("$b/") || b.startsWith("$a/")
+}
 
 /**
  * 超时取消时 laneRunner 协程被中止，其内存中的工具调用统计随返回值一起丢失；

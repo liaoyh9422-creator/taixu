@@ -64,11 +64,14 @@ class BuiltinToolContractTest {
         assertTrue("department" in required)
         assertTrue("agentQuery" in required)
         assertTrue("prompt" in required)
+        assertTrue("writePaths" in required)
+        assertTrue("writePaths" in properties)
         assertTrue("role" in properties)
         assertTrue("role" !in required)
         assertEquals(9, departments.size)
         assertEquals("6", subagents["maxItems"].toString())
         assertTrue(tool.function.description.contains("本地索引"))
+        assertTrue(tool.function.description.contains("同一次调用"))
     }
 
     @Test

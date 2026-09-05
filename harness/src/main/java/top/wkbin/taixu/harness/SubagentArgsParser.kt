@@ -29,7 +29,11 @@ object SubagentArgsParser {
             val agentQuery = candidate.string("agentQuery").orEmpty().trim()
             if (role.isBlank() && (department.isBlank() || agentQuery.isBlank())) return@mapNotNull null
             val rawModel = candidate.string("model") ?: candidate.string("modelId") ?: candidate.string("model_id")
-            val model = rawModel?.trim()?.takeIf { it.isNotBlank() && !it.equals("inherit", ignoreCase = true) }
+            val model = rawModel?.trim()?.takeIf { it.isNotBlank() }
+            val writePaths = (candidate.strings("writePaths") + candidate.strings("write_paths"))
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
 
             SubagentTaskSpec(
                 taskName = candidate.string("taskName")?.trim()?.takeIf { it.isNotBlank() } ?: defaultTaskName,
@@ -37,7 +41,7 @@ object SubagentArgsParser {
                 prompt = prompt,
                 department = department,
                 agentQuery = agentQuery,
-                writePaths = candidate.strings("writePaths").map { it.trim() },
+                writePaths = writePaths,
                 model = model,
             )
         }.take(maxTasks.coerceAtLeast(0))

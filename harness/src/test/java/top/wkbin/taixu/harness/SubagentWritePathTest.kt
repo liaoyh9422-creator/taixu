@@ -8,7 +8,7 @@ import top.wkbin.taixu.core.model.SubagentTaskSpec
 
 /**
  * 阶段三写租约：验证同一波内写路径互不相交（可并行）、撞同文件被拆到不同波（串行）、
- * 缺省整工作区租约独占一波（串行）。
+ * 缺省只读任务并行、整工作区显式租约独占一波（串行）。
  */
 class SubagentWritePathTest {
 
@@ -48,35 +48,48 @@ class SubagentWritePathTest {
     }
 
     @Test
-    fun `whole-workspace task gets its own exclusive serial wave`() {
+    fun `read-only tasks are packed into one parallel wave`() {
         val waves = buildWriteCleanWaves(
             listOf(
-                spec("打包", "build.gradle.kts"),
-                spec("全量整理"),         // 未声明 write_paths → 整工作区租约
-                spec("迁移", "migrations/"),
+                spec("S1"),
+                spec("S2"),
+                spec("S3"),
             ),
         )
 
-        // 全量整理独占一波（不得与其他任何任务同波）；
-        // 打包与迁移路径不冲突 → 可与全量整理不同波、彼此同波并行。
-        assertEquals(2, waves.size)
-        val wholeWave = waves.first { wave -> wave.any { it.taskName == "全量整理" } }
-        assertEquals(1, wholeWave.size)
-        val otherWave = waves.first { wave -> wave.none { it.taskName == "全量整理" } }
-        assertEquals(setOf("打包", "迁移"), otherWave.map { it.taskName }.toSet())
+        assertEquals(1, waves.size)
+        assertEquals(listOf("S1", "S2", "S3"), waves.single().map { it.taskName })
     }
 
     @Test
-    fun `a declared-path task never shares a wave with a whole-workspace task`() {
+    fun `whole-workspace marker gets its own exclusive serial wave`() {
         val waves = buildWriteCleanWaves(
             listOf(
-                spec("任意改动"),
+                spec("全量整理", "*"),
                 spec("局部", "docs/readme.md"),
             ),
         )
 
         assertEquals(2, waves.size)
         assertTrue(waves.all { it.size == 1 })
+    }
+
+    @Test
+    fun `read-only tasks do not share a wave with writers`() {
+        val waves = buildWriteCleanWaves(listOf(spec("调研"), spec("实现", "app/src"), spec("审查")))
+
+        assertEquals(2, waves.size)
+        assertEquals(setOf("调研", "审查"), waves.first().map { it.taskName }.toSet())
+        assertEquals(listOf("实现"), waves.last().map { it.taskName })
+    }
+
+    @Test
+    fun `parent and child write paths conflict`() {
+        val waves = buildWriteCleanWaves(
+            listOf(spec("父目录", "app/src"), spec("子文件", "app/src/main/Main.kt")),
+        )
+
+        assertEquals(2, waves.size)
     }
 
     @Test

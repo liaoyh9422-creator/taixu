@@ -173,3 +173,11 @@ val MIGRATION_43_44 = object : Migration(43, 44) {
         db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_memories_expiresAt ON agent_memories(expiresAt)")
     }
 }
+
+/** Allow each subagent role to bind a default saved model profile. Null keeps parent-model inheritance. */
+val MIGRATION_44_45 = object : Migration(44, 45) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE agent_subagents ADD COLUMN defaultModelId TEXT DEFAULT null")
+        db.execSQL("ALTER TABLE agent_subagents ADD COLUMN defaultModelVariant TEXT DEFAULT null")
+    }
+}
