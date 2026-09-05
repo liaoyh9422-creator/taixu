@@ -14,6 +14,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,9 @@ import kotlin.time.Duration.Companion.milliseconds
  * 多数简单 HTML 页面已足够清晰，复杂动画场景 v1.1 升级。
  */
 class ScreenshotRecorder(private val context: Context) {
+
+    private val closed = AtomicBoolean(false)
+    private val lifecycleLock = Any()
 
     /**
      * 资源归属：本类创建 HandlerThread，就必须自己 quit —— 引擎每次注销重建都会 new 一个
@@ -62,6 +66,7 @@ class ScreenshotRecorder(private val context: Context) {
         preferredHeight: Int? = null,
         timeoutMs: Long = 8_000L,
     ): ToolImageRef? {
+        if (closed.get()) return null
         val deferred = CompletableDeferred<Bitmap?>()
         mainHandler.post {
             // WebView 无 isDestroyed API：视图已销毁时 measure/layout/draw 可能抛异常，整体兜底为 null
@@ -87,12 +92,22 @@ class ScreenshotRecorder(private val context: Context) {
             } catch (t: Throwable) {
                 null
             }
-            deferred.complete(bmp)
+            // capture() 与引擎 shutdown 可能并发：关闭后才完成的主线程绘制不能再进入 IO 阶段。
+            if (closed.get()) {
+                bmp?.recycle()
+                deferred.complete(null)
+            } else {
+                deferred.complete(bmp)
+            }
         }
         val bmp = withTimeoutOrNull(timeoutMs.milliseconds) { deferred.await() }
         if (bmp == null) {
             // 超时放弃等待，但主线程 block 稍后仍可能完成回调并产生 Bitmap：到达即回收，避免泄漏
             lateRecycleScope.launch { deferred.await()?.recycle() }
+            return null
+        }
+        if (closed.get()) {
+            bmp.recycle()
             return null
         }
         val file = writePngAsync(tabId, bmp) ?: return null
@@ -113,7 +128,15 @@ class ScreenshotRecorder(private val context: Context) {
         val done = CompletableDeferred<String>()
         // shutdown 之后 looper 已退出，post 返回 false：必须在这里回收并放弃，
         // 否则 done 永远不会完成，调用方协程会永久挂起。
-        val posted = ioHandler.post {
+        // Handler 的取得也必须与 shutdown 串行化，否则“先检查、后初始化”仍会在关闭后起线程。
+        val handler = synchronized(lifecycleLock) {
+            if (closed.get()) null else ioHandler
+        }
+        if (handler == null) {
+            bmp.recycle()
+            return null
+        }
+        val posted = handler.post {
             runCatching {
                 FileOutputStream(file).use { out ->
                     bmp.compress(Bitmap.CompressFormat.PNG, 90, out)
@@ -145,9 +168,14 @@ class ScreenshotRecorder(private val context: Context) {
      * 之后再 post 会被拒绝并由 [writePngAsync] 回收 Bitmap。
      */
     fun shutdown() {
-        if (ioThreadDelegate.isInitialized()) {
-            ioThread.quitSafely()
+        if (!closed.compareAndSet(false, true)) return
+        synchronized(lifecycleLock) {
+            if (ioThreadDelegate.isInitialized()) {
+                ioThread.quitSafely()
+            }
         }
         lateRecycleScope.cancel()
     }
+
+    internal fun isIoThreadInitializedForTest(): Boolean = ioThreadDelegate.isInitialized()
 }
